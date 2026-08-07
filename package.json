@@ -24,7 +24,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/seashyne/mellow-renderer-.git"
+    "url": "https://github.com/seashyne/lenout-renderer.git"
   },
   "keywords": ["webgpu", "renderer", "2d", "3d", "tile-rendering", "compute-shader", "webnn", "canvas", "lenout"],
   "license": "UNLICENSED",
