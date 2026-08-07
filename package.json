@@ -1,0 +1,38 @@
+{
+  "name": "mellow-renderer",
+  "version": "0.1.0",
+  "description": "Mellow — zero-dependency WebGPU render engine. Tile-based hybrid 2D/3D with GPU compute shaders. Auto-detects hardware tier (CPU/WebGL/WebGPU/NPU).",
+  "type": "module",
+  "main": "./dist/mellowRenderer.js",
+  "types": "./dist/mellowRenderer.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/mellowRenderer.d.ts",
+      "import": "./dist/mellowRenderer.js"
+    },
+    "./tier1": "./dist/tier1/canvas2dRenderer.js",
+    "./tier2": "./dist/tier2/webgl2Renderer.js",
+    "./tier3": "./dist/tier3/webgpuRenderer.js"
+  },
+  "files": ["dist/", "src/shaders/*.wgsl"],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "demo": "vite demo --open"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/seashyne/mellow-renderer-.git"
+  },
+  "keywords": ["webgpu", "renderer", "2d", "3d", "tile-rendering", "compute-shader", "webnn", "canvas"],
+  "license": "UNLICENSED",
+  "private": true,
+  "devDependencies": {
+    "@webgpu/types": "^0.1.44",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0",
+    "vitest": "^2.0.0"
+  }
+}
