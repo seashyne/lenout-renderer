@@ -1,7 +1,7 @@
 {
-  "name": "mellow-renderer",
+  "name": "@lenout/render",
   "version": "0.1.0",
-  "description": "Mellow — zero-dependency WebGPU render engine. Tile-based hybrid 2D/3D with GPU compute shaders. Auto-detects hardware tier (CPU/WebGL/WebGPU/NPU).",
+  "description": "Lenout Render — zero-dependency WebGPU render engine. Tile-based hybrid 2D/3D with GPU compute shaders. Auto-detects hardware tier (CPU/WebGL/WebGPU/NPU).",
   "type": "module",
   "main": "./dist/mellowRenderer.js",
   "types": "./dist/mellowRenderer.d.ts",
@@ -26,7 +26,7 @@
     "type": "git",
     "url": "https://github.com/seashyne/mellow-renderer-.git"
   },
-  "keywords": ["webgpu", "renderer", "2d", "3d", "tile-rendering", "compute-shader", "webnn", "canvas"],
+  "keywords": ["webgpu", "renderer", "2d", "3d", "tile-rendering", "compute-shader", "webnn", "canvas", "lenout"],
   "license": "UNLICENSED",
   "private": true,
   "devDependencies": {

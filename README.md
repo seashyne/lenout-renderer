@@ -1,9 +1,9 @@
-# Mellow
+# Lenout Render
 
 > *"Mellow" — the feeling of drawing on glass.*
 > *No jank, no lag, no compromise.*
 
-**Mellow** is the zero-dependency WebGPU render engine powering [Lenout](https://lenout.com).
+**Lenout Render** (codename Mellow) is the zero-dependency WebGPU render engine powering [Lenout](https://lenout.com).
 
 ## Architecture
 
@@ -38,7 +38,7 @@ npm run demo
 ## Usage
 
 ```typescript
-import { createMellowRenderer, detectMellowCapabilities } from "mellow-renderer";
+import { createMellowRenderer, detectMellowCapabilities } from "@lenout/render";
 
 const canvas = document.getElementById("canvas") as HTMLCanvasElement;
 
