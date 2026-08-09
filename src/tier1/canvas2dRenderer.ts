@@ -1,4 +1,5 @@
-import type { LenoutCapabilities, LenoutRenderer } from "../renderer.js";
+import { createCanvasDpiController } from "../dpi.js";
+import type { LenoutCapabilities, LenoutRenderer, LenoutRendererOptions } from "../renderer.js";
 import type { RenderCommand, RenderTile, Color } from "../types.js";
 
 /**
@@ -34,7 +35,9 @@ const roundRect = (
 export const createCanvas2DRenderer = (
   canvas: HTMLCanvasElement,
   capabilities: LenoutCapabilities,
+  options: LenoutRendererOptions = {},
 ): LenoutRenderer => {
+  const display = createCanvasDpiController(canvas, options);
   const ctx = canvas.getContext("2d", { alpha: false });
   if (!ctx) throw new Error("Lenout Renderer: Canvas 2D context not available");
 
@@ -153,6 +156,12 @@ export const createCanvas2DRenderer = (
 
   return {
     capabilities,
+    get display() {
+      return display.metrics;
+    },
+    resize(width, height, pixelRatio) {
+      return display.resize(width, height, pixelRatio);
+    },
 
     initialize(): void {
       // Canvas 2D needs no GPU init
@@ -164,6 +173,10 @@ export const createCanvas2DRenderer = (
 
     renderTile(tile: RenderTile, commands: RenderCommand[], isDirty: boolean): void {
       if (!isDirty) return; // Clean tile: canvas already has correct content
+
+      const ratio = display.metrics.pixelRatio;
+      // Commands stay in logical pixels while the backing store uses physical pixels.
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
 
       // Clear only this tile
       ctx.clearRect(tile.worldX, tile.worldY, tile.size, tile.size);

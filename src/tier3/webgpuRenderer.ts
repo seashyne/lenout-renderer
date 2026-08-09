@@ -1,4 +1,6 @@
 import { createBrushRefiner } from "../neural/webnnBrushRefiner.js";
+import { createCanvasDpiController } from "../dpi.js";
+import type { LenoutDisplayMetrics } from "../dpi.js";
 import type { LenoutCapabilities, LenoutRenderer, LenoutRendererOptions } from "../renderer.js";
 import type { RenderCommand, RenderTile } from "../types.js";
 import { createTextBitmapCache } from "./textBitmapCache.js";
@@ -62,13 +64,14 @@ const encodeTile = (
   target: GPUTexture,
   plan: TileDrawPlan,
   tile: RenderTile,
-  canvas: HTMLCanvasElement,
+  display: LenoutDisplayMetrics,
   resources: WebGPUResources,
 ): void => {
-  const left = Math.max(0, Math.floor(tile.worldX));
-  const top = Math.max(0, Math.floor(tile.worldY));
-  const right = Math.min(canvas.width, Math.ceil(tile.worldX + tile.size));
-  const bottom = Math.min(canvas.height, Math.ceil(tile.worldY + tile.size));
+  const ratio = display.pixelRatio;
+  const left = Math.max(0, Math.floor(tile.worldX * ratio));
+  const top = Math.max(0, Math.floor(tile.worldY * ratio));
+  const right = Math.min(display.physicalWidth, Math.ceil((tile.worldX + tile.size) * ratio));
+  const bottom = Math.min(display.physicalHeight, Math.ceil((tile.worldY + tile.size) * ratio));
   if (right <= left || bottom <= top) return;
 
   const solidBuffer = resources.solidBuffer.upload(plan.solidValues);
@@ -110,6 +113,7 @@ export const createWebGPURenderer = async (
   detectedCapabilities: LenoutCapabilities,
   options: LenoutRendererOptions = {},
 ): Promise<LenoutRenderer> => {
+  const display = createCanvasDpiController(canvas, options);
   if (typeof navigator === "undefined" || !("gpu" in navigator)) {
     throw new Error("Lenout Renderer: WebGPU is not available");
   }
@@ -132,7 +136,7 @@ export const createWebGPURenderer = async (
     usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST,
   });
   const resources = createWebGPUResources(device, format);
-  const textCache = createTextBitmapCache(128, resources.releaseImage);
+  const textCache = createTextBitmapCache(128, resources.releaseImage, () => display.metrics.pixelRatio);
   const neuralStrength = Math.max(0, Math.min(1, options.neuralBrushSmoothing ?? 0.18));
   const brushRefiner = await createBrushRefiner(neuralStrength > 0);
   const usesWebNN = brushRefiner.backend === "webnn" || brushRefiner.backend === "webnn-accelerated";
@@ -151,8 +155,8 @@ export const createWebGPURenderer = async (
   let destroyed = false;
 
   const ensureAccumulation = (): void => {
-    const width = canvas.width;
-    const height = canvas.height;
+    const width = display.metrics.physicalWidth;
+    const height = display.metrics.physicalHeight;
     if (width < 1 || height < 1 || (width === accumulationWidth && height === accumulationHeight)) return;
     accumulation?.destroy();
     accumulation = device.createTexture({
@@ -163,7 +167,7 @@ export const createWebGPURenderer = async (
     });
     accumulationWidth = width;
     accumulationHeight = height;
-    resources.updateCanvasSize(width, height);
+    resources.updateCanvasSize(display.metrics.logicalWidth, display.metrics.logicalHeight);
     const encoder = device.createCommandEncoder({ label: "Lenout accumulation reset" });
     encoder.beginRenderPass({
       colorAttachments: [{
@@ -178,6 +182,12 @@ export const createWebGPURenderer = async (
 
   return {
     capabilities,
+    get display() {
+      return display.metrics;
+    },
+    resize(width, height, pixelRatio) {
+      return display.resize(width, height, pixelRatio);
+    },
     initialize() {
       ensureAccumulation();
     },
@@ -198,16 +208,16 @@ export const createWebGPURenderer = async (
       if (destroyed || !isDirty || !accumulation) return;
       const plan = buildTileDrawPlan(commands, tile, resources, textCache);
       const encoder = device.createCommandEncoder({ label: `Lenout tile encoder ${tile.id}` });
-      encodeTile(encoder, accumulation, plan, tile, canvas, resources);
+      encodeTile(encoder, accumulation, plan, tile, display.metrics, resources);
       device.queue.submit([encoder.finish()]);
     },
     endFrame() {
-      if (destroyed || !accumulation || canvas.width < 1 || canvas.height < 1) return;
+      if (destroyed || !accumulation || display.metrics.physicalWidth < 1 || display.metrics.physicalHeight < 1) return;
       const encoder = device.createCommandEncoder({ label: "Lenout present" });
       encoder.copyTextureToTexture(
         { texture: accumulation },
         { texture: context.getCurrentTexture() },
-        [canvas.width, canvas.height, 1],
+        [display.metrics.physicalWidth, display.metrics.physicalHeight, 1],
       );
       device.queue.submit([encoder.finish()]);
       textCache.sweep();

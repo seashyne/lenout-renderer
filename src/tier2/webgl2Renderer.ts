@@ -1,4 +1,5 @@
-import type { LenoutCapabilities, LenoutRenderer } from "../renderer.js";
+import { createCanvasDpiController } from "../dpi.js";
+import type { LenoutCapabilities, LenoutRenderer, LenoutRendererOptions } from "../renderer.js";
 import type { RenderCommand, RenderTile, Color, Vec2 } from "../types.js";
 import { circlePoints, ellipsePoints, tessellatePath, parsePath } from "../pathParser.js";
 import { triangulate, buildTriangleVertices, fanTriangulate } from "../triangulate.js";
@@ -182,7 +183,9 @@ const createBrushTipTexture = (gl: WebGL2RenderingContext, size: number): WebGLT
 export const createWebGL2Renderer = (
   canvas: HTMLCanvasElement,
   capabilities: LenoutCapabilities,
+  options: LenoutRendererOptions = {},
 ): LenoutRenderer => {
+  const display = createCanvasDpiController(canvas, options);
   const gl = canvas.getContext("webgl2", {
     alpha: false,
     antialias: false,
@@ -322,7 +325,7 @@ export const createWebGL2Renderer = (
 
     gl.useProgram(brushProgram);
     gl.bindVertexArray(brushVAO);
-    gl.uniform2f(brushUCanvasSize, canvas.width, canvas.height);
+    gl.uniform2f(brushUCanvasSize, display.metrics.logicalWidth, display.metrics.logicalHeight);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, brushTipTexture);
     gl.uniform1i(brushUBrushTip, 0);
@@ -331,6 +334,12 @@ export const createWebGL2Renderer = (
 
   return {
     capabilities,
+    get display() {
+      return display.metrics;
+    },
+    resize(width, height, pixelRatio) {
+      return display.resize(width, height, pixelRatio);
+    },
 
     initialize(): void {
       const vs = compileShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
@@ -387,17 +396,23 @@ export const createWebGL2Renderer = (
 
       // Bind accumulation framebuffer — all tile rendering goes here
       gl.bindFramebuffer(gl.FRAMEBUFFER, accumFB);
+      gl.viewport(0, 0, w, h);
     },
 
     renderTile(tile: RenderTile, commands: RenderCommand[], isDirty: boolean): void {
       if (!isDirty) return; // Clean tile: accumulation already has correct content
 
-      const w = canvas.width;
-      const h = canvas.height;
+      const w = display.metrics.logicalWidth;
+      const h = display.metrics.logicalHeight;
+      const ratio = display.metrics.pixelRatio;
 
       // Scissor to tile bounds (WebGL Y is bottom-up)
       gl.enable(gl.SCISSOR_TEST);
-      gl.scissor(tile.worldX, h - tile.worldY - tile.size, tile.size, tile.size);
+      const left = Math.max(0, Math.floor(tile.worldX * ratio));
+      const top = Math.max(0, Math.floor(tile.worldY * ratio));
+      const right = Math.min(canvas.width, Math.ceil((tile.worldX + tile.size) * ratio));
+      const bottom = Math.min(canvas.height, Math.ceil((tile.worldY + tile.size) * ratio));
+      gl.scissor(left, canvas.height - bottom, Math.max(0, right - left), Math.max(0, bottom - top));
 
       // Clear tile area
       gl.clearColor(0, 0, 0, 0);
@@ -469,7 +484,7 @@ export const createWebGL2Renderer = (
             const buf = gl.createBuffer()!;
             gl.bindBuffer(gl.ARRAY_BUFFER, buf);
             gl.bufferData(gl.ARRAY_BUFFER, ndc, gl.DYNAMIC_DRAW);
-            gl.lineWidth(cmd.width);
+            gl.lineWidth(cmd.width * ratio);
             gl.useProgram(rectProgram);
             gl.bindVertexArray(rectVAO);
             gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -504,9 +519,12 @@ export const createWebGL2Renderer = (
           case "text": {
             // Fallback: render text via Canvas 2D, then draw as image
             const c = document.createElement("canvas");
-            c.width = 512;
-            c.height = 64;
+            const textWidth = 512;
+            const textHeight = 64;
+            c.width = Math.ceil(textWidth * ratio);
+            c.height = Math.ceil(textHeight * ratio);
             const tctx = c.getContext("2d")!;
+            tctx.setTransform(ratio, 0, 0, ratio, 0, 0);
             tctx.font = cmd.font || "24px sans-serif";
             tctx.fillStyle = `rgba(${Math.round(cmd.color[0] * 255)},${Math.round(cmd.color[1] * 255)},${Math.round(cmd.color[2] * 255)},${cmd.color[3]})`;
             tctx.textBaseline = "top";
@@ -522,7 +540,7 @@ export const createWebGL2Renderer = (
 
             gl.useProgram(imageProgram);
             gl.bindVertexArray(imageVAO);
-            gl.uniformMatrix3fv(imgUTransform, false, rectTransform(cmd.x, cmd.y, c.width, c.height, w, h));
+            gl.uniformMatrix3fv(imgUTransform, false, rectTransform(cmd.x, cmd.y, textWidth, textHeight, w, h));
             gl.uniform1i(imgUTexture, 0);
             gl.uniform1f(imgUOpacity, 1);
             gl.activeTexture(gl.TEXTURE0);

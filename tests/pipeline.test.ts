@@ -20,6 +20,15 @@ const stubRenderer = (): LenoutRenderer & { tileCalls: { tile: RenderTile; cmds:
       supports3D: false,
       workerCount: 4,
     } satisfies LenoutCapabilities,
+    display: {
+      logicalWidth: 1,
+      logicalHeight: 1,
+      physicalWidth: 1,
+      physicalHeight: 1,
+      pixelRatio: 1,
+      revision: 0,
+    },
+    resize(): boolean { return false; },
     initialize(): void {},
     beginFrame(): void {},
     renderTile(tile: RenderTile, commands: RenderCommand[], isDirty: boolean): void {
@@ -111,5 +120,23 @@ describe("RenderPipeline (tile-aware)", () => {
     // After render, the pipeline should have dispatched dirty tiles
     const dirtyCalls = renderer.tileCalls.filter((c) => c.dirty);
     expect(dirtyCalls.length).toBeGreaterThan(0);
+  });
+
+  it("redraws retained tiles after a DPI backing-store change", () => {
+    const sg = createSceneGraph({ maxNodes: 10 });
+    const tm = createTileManager(128);
+    const renderer = stubRenderer();
+    const pipeline = createRenderPipeline(sg, tm, renderer);
+    const idx = sg.add(NodeKind.Vector, 0, 0, 100, 100);
+    pipeline.setNodeCommands(idx, [
+      { type: "rect", dst: { x: 0, y: 0, width: 100, height: 100 }, fill: [1, 0, 0, 1], radius: 0 },
+    ]);
+    pipeline.render(320, 180);
+
+    const callsBefore = renderer.tileCalls.length;
+    (renderer.display as { revision: number }).revision++;
+    pipeline.render(320, 180);
+
+    expect(renderer.tileCalls.slice(callsBefore).some((call) => call.dirty)).toBe(true);
   });
 });

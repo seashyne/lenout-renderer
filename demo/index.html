@@ -129,30 +129,30 @@
     const brushColorEl = document.getElementById("brushColor");
     const clearBtn = document.getElementById("clearBtn");
 
-    // --- Resize canvas to fill available space ---
+    // --- Init renderer ---
+    const renderer = await createLenoutRenderer(canvas, {
+      pixelRatio: "auto",
+      maxPixelRatio: 2,
+      manageCssSize: false,
+    });
+    await renderer.initialize();
+    let viewportWidth = renderer.display.logicalWidth;
+    let viewportHeight = renderer.display.logicalHeight;
     const resize = () => {
-      const rect = canvas.parentElement.getBoundingClientRect();
-      const w = Math.floor(rect.width * devicePixelRatio);
-      const h = Math.floor(rect.height * devicePixelRatio);
-      if (canvas.width !== w || canvas.height !== h) {
-        canvas.width = w;
-        canvas.height = h;
-      }
+      viewportWidth = Math.max(1, canvas.clientWidth);
+      viewportHeight = Math.max(1, canvas.clientHeight);
+      renderer.resize(viewportWidth, viewportHeight);
     };
     resize();
     window.addEventListener("resize", resize);
-
-    // --- Init renderer ---
-    const renderer = await createLenoutRenderer(canvas);
-    await renderer.initialize();
-    tierEl.textContent = `${renderer.capabilities.tier} / ${renderer.capabilities.neuralBackend}`;
+    tierEl.textContent = `${renderer.capabilities.tier} / ${renderer.capabilities.neuralBackend} / ${renderer.display.pixelRatio}x`;
 
     const sceneGraph = createSceneGraph({ maxNodes: 1000 });
     const tileManager = createTileManager(renderer.capabilities.tileSize);
     const pipeline = createRenderPipeline(sceneGraph, tileManager, renderer);
 
     // --- Background clear node ---
-    const bgIdx = sceneGraph.add(NodeKind.Canvas, 0, 0, canvas.width, canvas.height);
+    const bgIdx = sceneGraph.add(NodeKind.Canvas, 0, 0, viewportWidth, viewportHeight);
     pipeline.setNodeCommands(bgIdx, [
       { type: "clear", color: [0.03, 0.04, 0.08, 1] },
     ]);
@@ -160,7 +160,7 @@
     // --- Stroke state ---
     let currentNodeIdx = -1;
     let accumulatedDabs = [];
-    const strokeHistory: number[] = []; // node indices for undo
+    const strokeHistory = []; // node indices for undo
     const stroke = createStrokeSession({
       size: Number(brushSizeEl.value),
       hardness: Number(brushHardEl.value) / 100,
@@ -197,8 +197,8 @@
 
       updateBrushConfig();
       stroke.begin({
-        x: e.offsetX * devicePixelRatio,
-        y: e.offsetY * devicePixelRatio,
+        x: e.offsetX,
+        y: e.offsetY,
         pressure: e.pressure || 0.5,
         time: e.timeStamp,
       });
@@ -213,8 +213,8 @@
       e.preventDefault();
 
       const dabs = stroke.move({
-        x: e.offsetX * devicePixelRatio,
-        y: e.offsetY * devicePixelRatio,
+        x: e.offsetX,
+        y: e.offsetY,
         pressure: e.pressure || 0.5,
         time: e.timeStamp,
       });
@@ -292,7 +292,7 @@
     // --- Render loop ---
     const loop = () => {
       resize();
-      pipeline.render(canvas.width, canvas.height);
+      pipeline.render(viewportWidth, viewportHeight);
       frames++;
       const now = performance.now();
       if (now - lastTime >= 500) {

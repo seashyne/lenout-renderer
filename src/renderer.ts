@@ -12,8 +12,11 @@ export type LenoutTier = "cpu" | "webgl2" | "webgpu" | "webgpu+webnn";
 import type { RenderCommand, RenderTile } from "./types.js";
 import { probeWebNN } from "./neural/webnnBrushRefiner.js";
 import type { NeuralBackend } from "./neural/webnnTypes.js";
+import type { LenoutDisplayMetrics, LenoutDpiOptions, LenoutPixelRatio } from "./dpi.js";
 
-export interface LenoutRendererOptions {
+export type { LenoutDisplayMetrics, LenoutDpiOptions, LenoutPixelRatio } from "./dpi.js";
+
+export interface LenoutRendererOptions extends LenoutDpiOptions {
   /** Strength of asynchronous neural dab smoothing. Zero disables refinement. */
   neuralBrushSmoothing?: number;
   powerPreference?: GPUPowerPreference;
@@ -43,6 +46,10 @@ export interface LenoutCapabilities {
  */
 export interface LenoutRenderer {
   readonly capabilities: LenoutCapabilities;
+  /** Logical size and physical backing-store resolution currently in use. */
+  readonly display: LenoutDisplayMetrics;
+  /** Resize in logical CSS pixels. Returns true when the backing store changed. */
+  resize(width: number, height: number, pixelRatio?: LenoutPixelRatio): boolean;
   /** One-time GPU resource allocation */
   initialize(): void;
   /** Optional asynchronous command preparation. Rendering continues with the unprepared commands meanwhile. */
@@ -163,7 +170,7 @@ export const createLenoutRenderer = async (
             maxBrushDabs: 500,
             supports3D: false,
             workerCount: typeof navigator === "undefined" ? 4 : navigator.hardwareConcurrency || 4,
-          });
+          }, options);
         }
         const { createCanvas2DRenderer } = await import("./tier1/canvas2dRenderer.js");
         return createCanvas2DRenderer(canvas, {
@@ -175,16 +182,16 @@ export const createLenoutRenderer = async (
           maxBrushDabs: 200,
           tileSize: 128,
           supports3D: false,
-        });
+        }, options);
       }
     }
     case "webgl2": {
       const { createWebGL2Renderer } = await import("./tier2/webgl2Renderer.js");
-      return createWebGL2Renderer(canvas, caps);
+      return createWebGL2Renderer(canvas, caps, options);
     }
     default: {
       const { createCanvas2DRenderer } = await import("./tier1/canvas2dRenderer.js");
-      return createCanvas2DRenderer(canvas, caps);
+      return createCanvas2DRenderer(canvas, caps, options);
     }
   }
 };

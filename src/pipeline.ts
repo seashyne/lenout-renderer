@@ -23,7 +23,7 @@ export interface RenderPipeline {
   setNodeCommands(nodeIndex: number, commands: RenderCommand[]): void;
   /** Remove a node's commands (called when node is removed) */
   removeNode(nodeIndex: number): void;
-  /** Execute one tile-aware frame. Pass canvas pixel dimensions. */
+  /** Execute one tile-aware frame. Pass logical CSS-pixel dimensions. */
   render(viewportW: number, viewportH: number): void;
   /** Frame stats from last render() */
   readonly stats: PipelineStats;
@@ -115,6 +115,7 @@ export const createRenderPipeline = (
     running: boolean;
   }>();
   let _stats: PipelineStats = { frameTime: 0, tileCount: 0, dirtyTileCount: 0, drawCalls: 0 };
+  let displayRevision = renderer.display.revision;
 
   const markCommandsDirty = (commands: readonly RenderCommand[]): void => {
     for (const command of commands) {
@@ -176,6 +177,12 @@ export const createRenderPipeline = (
 
     render(viewportW: number, viewportH: number) {
       const t0 = performance.now();
+      renderer.resize(viewportW, viewportH);
+      if (renderer.display.revision !== displayRevision) {
+        // A changed backing store has no retained pixels; every visible tile must be redrawn.
+        tileManager.reset();
+        displayRevision = renderer.display.revision;
+      }
       const dirtyNodes = sceneGraph.flushDirty();
 
       // Mark tiles dirty for nodes that changed this frame

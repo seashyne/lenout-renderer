@@ -21,6 +21,7 @@ const colorCSS = (color: Color): string => {
 export const createTextBitmapCache = (
   limit = 128,
   onEvict: (source: ImageBitmap) => void = () => undefined,
+  pixelRatio: () => number = () => 1,
 ): TextBitmapCache => {
   const cache = new Map<string, { source: ImageBitmap; width: number; height: number }>();
 
@@ -38,7 +39,8 @@ export const createTextBitmapCache = (
     get(text, requestedFont, x, y, color) {
       if (!text || typeof OffscreenCanvas === "undefined") return null;
       const font = requestedFont || "14px sans-serif";
-      const key = `${font}\u0000${colorKey(color)}\u0000${text}`;
+      const ratio = Math.max(0.5, pixelRatio());
+      const key = `${ratio.toFixed(3)}\u0000${font}\u0000${colorKey(color)}\u0000${text}`;
       const cached = cache.get(key);
       if (cached) {
         cache.delete(key);
@@ -57,9 +59,10 @@ export const createTextBitmapCache = (
         (metrics.actualBoundingBoxAscent || fontPixels) +
         (metrics.actualBoundingBoxDescent || fontPixels * 0.3) + 4,
       ));
-      const canvas = new OffscreenCanvas(width, height);
+      const canvas = new OffscreenCanvas(Math.ceil(width * ratio), Math.ceil(height * ratio));
       const context = canvas.getContext("2d");
       if (!context) return null;
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
       context.clearRect(0, 0, width, height);
       context.font = font;
       context.fillStyle = colorCSS(color);

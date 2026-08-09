@@ -27,6 +27,12 @@ The Tier 3 renderer includes:
 
 The renderer is currently 2D. `supports3D` is deliberately `false` until a real 3D command and depth pipeline exist.
 
+## DPI-aware rendering
+
+Lenout keeps world coordinates in logical CSS pixels and sizes the canvas backing store independently. The default `pixelRatio: "auto"` follows `window.devicePixelRatio`, capped at `2` to control GPU memory. WebGPU, WebGL 2, Canvas 2D, text bitmaps, tile scissors, and brush rendering all use the same display metrics.
+
+Call `renderer.resize(width, height)` with logical dimensions when the layout changes. The render pipeline also performs this synchronization from the logical viewport passed to `render()`. A DPI or size change resets the retained tile surface so the next frame is redrawn at the new resolution.
+
 ## WebNN brush refinement
 
 Long brush strokes are prepared asynchronously so pointer rendering is never blocked. A fixed WebNN matrix graph smooths adjacent position, size, and opacity samples in batches. Short strokes use the equivalent CPU operation because dispatch overhead would be larger than the work. Pending pointer updates are coalesced so only the newest node command is refined.
@@ -43,21 +49,30 @@ const canvas = document.querySelector("canvas")!;
 const renderer = await createLenoutRenderer(canvas, {
   neuralBrushSmoothing: 0.18,
   powerPreference: "high-performance",
+  pixelRatio: "auto",
+  maxPixelRatio: 2,
 });
 renderer.initialize();
 
 const pipeline = createRenderPipeline(sceneGraph, tileManager, renderer);
-pipeline.render(canvas.width, canvas.height);
+const bounds = canvas.parentElement!.getBoundingClientRect();
+pipeline.render(bounds.width, bounds.height);
+
+console.log(renderer.display);
+// { logicalWidth, logicalHeight, physicalWidth, physicalHeight, pixelRatio, revision }
 
 renderer.destroy();
 ```
 
 Set `neuralBrushSmoothing` to `0` to preserve raw dab values, or use a value from `0` to `1` to blend toward neural/CPU-refined values.
 
+Set `pixelRatio` to a fixed number for deterministic screenshots or exports. `maxPixelRatio` accepts values up to `4`; higher ratios increase backing-store memory quadratically. Set `manageCssSize: false` only when the host application owns the canvas CSS size completely.
+
 ## Source layout
 
 ```text
 src/
+├── dpi.ts                      logical/physical display sizing
 ├── renderer.ts                 capability detection and tier factory
 ├── pipeline.ts                 dirty-tile orchestration and async preparation
 ├── neural/
