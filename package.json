@@ -1,14 +1,30 @@
 {
   "name": "@lenout/render",
-  "version": "0.1.0",
-  "description": "Lenout Render — zero-dependency WebGPU render engine. Tile-based hybrid 2D/3D with GPU compute shaders. Auto-detects hardware tier (CPU/WebGL/WebGPU/NPU).",
+  "version": "0.6.0",
+  "description": "Lenout Renderer (night) — tile-based WebGPU renderer with asynchronous WebNN brush refinement and WebGL2/Canvas fallbacks.",
   "type": "module",
-  "main": "./dist/mellowRenderer.js",
-  "types": "./dist/mellowRenderer.d.ts",
+  "main": "./dist/renderer.js",
+  "types": "./dist/renderer.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/mellowRenderer.d.ts",
-      "import": "./dist/mellowRenderer.js"
+      "types": "./dist/renderer.d.ts",
+      "import": "./dist/renderer.js"
+    },
+    "./pipeline": {
+      "types": "./dist/pipeline.d.ts",
+      "import": "./dist/pipeline.js"
+    },
+    "./scene-graph": {
+      "types": "./dist/sceneGraph.d.ts",
+      "import": "./dist/sceneGraph.js"
+    },
+    "./stroke-session": {
+      "types": "./dist/strokeSession.d.ts",
+      "import": "./dist/strokeSession.js"
+    },
+    "./tile-manager": {
+      "types": "./dist/tileManager.d.ts",
+      "import": "./dist/tileManager.js"
     },
     "./tier1": "./dist/tier1/canvas2dRenderer.js",
     "./tier2": "./dist/tier2/webgl2Renderer.js",
@@ -26,7 +42,7 @@
     "type": "git",
     "url": "https://github.com/seashyne/lenout-renderer.git"
   },
-  "keywords": ["webgpu", "renderer", "2d", "3d", "tile-rendering", "compute-shader", "webnn", "canvas", "lenout"],
+  "keywords": ["webgpu", "renderer", "2d", "tile-rendering", "webnn", "canvas", "lenout"],
   "license": "UNLICENSED",
   "private": true,
   "devDependencies": {

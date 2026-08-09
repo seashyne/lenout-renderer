@@ -5,7 +5,7 @@
 // All fields at index `i` belong to the same node.
 // ---------------------------------------------------------------------------
 
-export const enum NodeKind {
+export enum NodeKind {
   Canvas = 0,
   Image = 1,
   Vector = 2,
@@ -75,8 +75,9 @@ export const createSceneGraph = (init: SceneGraphInit = {}): SceneGraph => {
 
     add(kind, x, y, w, h): number {
       const i = freeSlots.pop() ?? data.count++;
-      if (i >= max) throw new Error("Mellow: scene graph capacity exceeded");
+      if (i >= max) throw new Error("Lenout Renderer: scene graph capacity exceeded");
       data.kinds[i] = kind;
+      data.visible[i] = 1;
       data.worldX[i] = x;
       data.worldY[i] = y;
       data.width[i] = w;

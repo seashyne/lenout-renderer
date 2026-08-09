@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Mellow — Triangle Demo</title>
+  <title>Lenout Renderer (night) — Demo</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -13,43 +13,301 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: center;
       height: 100dvh;
-      gap: 16px;
+      overflow: hidden;
     }
-    canvas {
-      border: 1px solid rgba(255,255,255,0.08);
-      border-radius: 8px;
+    #toolbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 16px;
+      width: 100%;
+      max-width: 820px;
+      background: rgba(255,255,255,0.03);
+      border-bottom: 1px solid rgba(255,255,255,0.06);
     }
-    #info {
-      font-size: 12px;
+    #toolbar label {
+      font-size: 11px;
       color: #94a3b8;
-      text-align: center;
+      display: flex;
+      align-items: center;
+      gap: 4px;
     }
-    #tier {
-      color: #38bdf8;
-      font-weight: 600;
+    #toolbar input[type="range"] { width: 80px; accent-color: #38bdf8; }
+    #toolbar input[type="color"] {
+      width: 28px; height: 28px;
+      border: none; border-radius: 6px;
+      cursor: pointer; background: none;
+    }
+    #toolbar button {
+      padding: 6px 14px;
+      border-radius: 6px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.05);
+      color: #e2e8f0;
+      font-size: 12px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    #toolbar button.active { background: rgba(56,189,248,0.15); border-color: #38bdf8; }
+    #palette { display: flex; gap: 4px; }
+    #palette button {
+      width: 22px; height: 22px; padding: 0;
+      border-radius: 50%; border: 2px solid transparent;
+      cursor: pointer; transition: border-color 0.15s;
+    }
+    #palette button:hover, #palette button.on { border-color: #38bdf8; }
+    #stats {
+      display: grid; grid-template-columns: 1fr 1fr;
+      gap: 2px 12px; font-size: 10px; color: #64748b;
+      margin-left: 8px;
+    }
+    #stats span { color: #94a3b8; }
+    #info {
+      display: flex; gap: 12px;
+      font-size: 11px; color: #94a3b8;
+      margin-left: auto;
+    }
+    #tier { color: #38bdf8; font-weight: 600; }
+    #fps { color: #a78bfa; font-weight: 600; }
+    canvas {
+      flex: 1;
+      width: 100%;
+      max-width: 820px;
+      border-left: 1px solid rgba(255,255,255,0.06);
+      border-right: 1px solid rgba(255,255,255,0.06);
+      cursor: crosshair;
+      touch-action: none;
     }
   </style>
 </head>
 <body>
-  <canvas id="canvas" width="800" height="600"></canvas>
-  <div id="info">
-    Mellow Renderer — Tier: <span id="tier">detecting…</span>
+  <div id="toolbar">
+    <label>Size <input type="range" id="brushSize" min="2" max="80" value="20" /></label>
+    <label>Hard <input type="range" id="brushHard" min="0" max="100" value="50" /></label>
+    <label>Smooth <input type="range" id="smoothing" min="0" max="100" value="50" /></label>
+    <div id="palette">
+      <button style="background:#ffffff" data-color="#ffffff"></button>
+      <button style="background:#38bdf8" data-color="#38bdf8"></button>
+      <button style="background:#f43f5e" data-color="#f43f5e"></button>
+      <button style="background:#22c55e" data-color="#22c55e"></button>
+      <button style="background:#f59e0b" data-color="#f59e0b"></button>
+      <button style="background:#a855f7" data-color="#a855f7"></button>
+    </div>
+    <input type="color" id="brushColor" value="#ffffff" />
+    <button id="undoBtn">Undo</button>
+    <button id="clearBtn">Clear</button>
+    <div id="stats">
+      <div>Tiles: <span id="stTiles">-</span></div>
+      <div>Dirty: <span id="stDirty">-</span></div>
+      <div>Draws: <span id="stDraws">-</span></div>
+      <div>FPS: <span id="stFps">-</span></div>
+    </div>
+    <div id="info">
+      <span id="tier">detecting…</span>
+    </div>
   </div>
+  <canvas id="canvas"></canvas>
+
   <script type="module">
-    import { createMellowRenderer, detectMellowCapabilities } from "../dist/mellowRenderer.js";
+    import { createLenoutRenderer } from "../dist/renderer.js";
+    import { createSceneGraph, NodeKind } from "../dist/sceneGraph.js";
+    import { createTileManager } from "../dist/tileManager.js";
+    import { createRenderPipeline } from "../dist/pipeline.js";
+    import { createStrokeSession } from "../dist/strokeSession.js";
 
     const canvas = document.getElementById("canvas");
     const tierEl = document.getElementById("tier");
+    const stTiles = document.getElementById("stTiles");
+    const stDirty = document.getElementById("stDirty");
+    const stDraws = document.getElementById("stDraws");
+    const stFps = document.getElementById("stFps");
+    const smoothingEl = document.getElementById("smoothing");
+    const undoBtn = document.getElementById("undoBtn");
+    const brushSizeEl = document.getElementById("brushSize");
+    const brushHardEl = document.getElementById("brushHard");
+    const brushColorEl = document.getElementById("brushColor");
+    const clearBtn = document.getElementById("clearBtn");
 
-    const caps = await detectMellowCapabilities();
-    tierEl.textContent = caps.tier;
+    // --- Resize canvas to fill available space ---
+    const resize = () => {
+      const rect = canvas.parentElement.getBoundingClientRect();
+      const w = Math.floor(rect.width * devicePixelRatio);
+      const h = Math.floor(rect.height * devicePixelRatio);
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
+    };
+    resize();
+    window.addEventListener("resize", resize);
 
-    const renderer = await createMellowRenderer(canvas);
-    renderer.start();
+    // --- Init renderer ---
+    const renderer = await createLenoutRenderer(canvas);
+    await renderer.initialize();
+    tierEl.textContent = `${renderer.capabilities.tier} / ${renderer.capabilities.neuralBackend}`;
 
-    // Keep alive
+    const sceneGraph = createSceneGraph({ maxNodes: 1000 });
+    const tileManager = createTileManager(renderer.capabilities.tileSize);
+    const pipeline = createRenderPipeline(sceneGraph, tileManager, renderer);
+
+    // --- Background clear node ---
+    const bgIdx = sceneGraph.add(NodeKind.Canvas, 0, 0, canvas.width, canvas.height);
+    pipeline.setNodeCommands(bgIdx, [
+      { type: "clear", color: [0.03, 0.04, 0.08, 1] },
+    ]);
+
+    // --- Stroke state ---
+    let currentNodeIdx = -1;
+    let accumulatedDabs = [];
+    const strokeHistory: number[] = []; // node indices for undo
+    const stroke = createStrokeSession({
+      size: Number(brushSizeEl.value),
+      hardness: Number(brushHardEl.value) / 100,
+      color: hexToColor(brushColorEl.value),
+      spacing: 2,
+      pressureSize: true,
+      smoothing: Number(smoothingEl.value) / 100,
+    });
+
+    function hexToColor(hex) {
+      const r = parseInt(hex.slice(1, 3), 16) / 255;
+      const g = parseInt(hex.slice(3, 5), 16) / 255;
+      const b = parseInt(hex.slice(5, 7), 16) / 255;
+      return [r, g, b, 1];
+    }
+
+    function updateBrushConfig() {
+      stroke.config.size = Number(brushSizeEl.value);
+      stroke.config.hardness = Number(brushHardEl.value) / 100;
+      stroke.config.color = hexToColor(brushColorEl.value);
+      stroke.config.smoothing = Number(smoothingEl.value) / 100;
+    }
+
+    smoothingEl.addEventListener("input", updateBrushConfig);
+
+    brushSizeEl.addEventListener("input", updateBrushConfig);
+    brushHardEl.addEventListener("input", updateBrushConfig);
+    brushColorEl.addEventListener("input", updateBrushConfig);
+
+    // --- Pointer events ---
+    canvas.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      canvas.setPointerCapture(e.pointerId);
+
+      updateBrushConfig();
+      stroke.begin({
+        x: e.offsetX * devicePixelRatio,
+        y: e.offsetY * devicePixelRatio,
+        pressure: e.pressure || 0.5,
+        time: e.timeStamp,
+      });
+
+      // Create a new scene graph node for this stroke
+      currentNodeIdx = sceneGraph.add(NodeKind.Stroke, e.offsetX, e.offsetY, 1, 1);
+      accumulatedDabs = [];
+    });
+
+    canvas.addEventListener("pointermove", (e) => {
+      if (currentNodeIdx < 0) return;
+      e.preventDefault();
+
+      const dabs = stroke.move({
+        x: e.offsetX * devicePixelRatio,
+        y: e.offsetY * devicePixelRatio,
+        pressure: e.pressure || 0.5,
+        time: e.timeStamp,
+      });
+
+      if (dabs.length > 0) {
+        accumulatedDabs.push(...dabs);
+        pipeline.setNodeCommands(currentNodeIdx, [
+          { type: "brushDabs", dabs: [...accumulatedDabs] },
+        ]);
+      }
+    });
+
+    canvas.addEventListener("pointerup", (e) => {
+      if (currentNodeIdx < 0) return;
+      e.preventDefault();
+
+      const dabs = stroke.end();
+      if (dabs.length > 0) {
+        accumulatedDabs.push(...dabs);
+        pipeline.setNodeCommands(currentNodeIdx, [
+          { type: "brushDabs", dabs: [...accumulatedDabs] },
+        ]);
+      }
+      strokeHistory.push(currentNodeIdx);
+      currentNodeIdx = -1;
+    });
+
+    canvas.addEventListener("pointerleave", () => {
+      if (currentNodeIdx >= 0) {
+        stroke.cancel();
+        currentNodeIdx = -1;
+      }
+    });
+
+    // --- Clear ---
+    clearBtn.addEventListener("click", () => {
+      // Remove all stroke nodes (keep background)
+      // Re-create scene graph (simpler approach)
+      // Actually just mark bg dirty to trigger full clear
+      pipeline.setNodeCommands(bgIdx, [
+        { type: "clear", color: [0.03, 0.04, 0.08, 1] },
+      ]);
+      // Remove all other nodes by resetting the scene graph
+      // For simplicity, let's just clear the canvas through bg
+      for (let i = 0; i < sceneGraph.data.count; i++) {
+        if (i !== bgIdx) pipeline.removeNode(i);
+      }
+      // Re-add background as a refresh
+      pipeline.setNodeCommands(bgIdx, [
+        { type: "clear", color: [0.03, 0.04, 0.08, 1] },
+      ]);
+      strokeHistory.length = 0;
+    });
+
+    // --- Undo ---
+    undoBtn.addEventListener("click", () => {
+      const idx = strokeHistory.pop();
+      if (idx !== undefined) {
+        pipeline.removeNode(idx);
+      }
+    });
+
+    // --- Color palette ---
+    document.getElementById("palette").addEventListener("click", (e) => {
+      const btn = e.target.closest("button");
+      if (!btn?.dataset.color) return;
+      brushColorEl.value = btn.dataset.color;
+      updateBrushConfig();
+    });
+
+    // --- FPS ---
+    let frames = 0;
+    let lastTime = performance.now();
+
+    // --- Render loop ---
+    const loop = () => {
+      resize();
+      pipeline.render(canvas.width, canvas.height);
+      frames++;
+      const now = performance.now();
+      if (now - lastTime >= 500) {
+        const s = pipeline.stats;
+        stTiles.textContent = s.tileCount;
+        stDirty.textContent = s.dirtyTileCount;
+        stDraws.textContent = s.drawCalls;
+        stFps.textContent = Math.round(frames / ((now - lastTime) / 1000));
+        frames = 0;
+        lastTime = now;
+      }
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+
     window.addEventListener("beforeunload", () => renderer.destroy());
   </script>
 </body>

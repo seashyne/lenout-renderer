@@ -1,87 +1,74 @@
-# Lenout Render
+# Lenout Renderer (night)
 
-> *"Mellow" — the feeling of drawing on glass.*
-> *No jank, no lag, no compromise.*
+Lenout Renderer is the project-owned, tile-based 2D renderer. It selects native WebGPU first and falls back to WebGL 2 or Canvas 2D when the browser cannot create a WebGPU device.
 
-**Lenout Render** (codename Mellow) is the zero-dependency WebGPU render engine powering [Lenout](https://lenout.com).
+## Runtime tiers
 
-## Architecture
+| Tier | Drawing backend | Neural backend | Notes |
+|---|---|---|---|
+| `webgpu+webnn` | Native WebGPU | WebNN | WebNN context and graph are available |
+| `webgpu` | Native WebGPU | CPU fallback | WebGPU drawing without WebNN |
+| `webgl2` | WebGL 2 | None | Compatibility renderer |
+| `cpu` | Canvas 2D | None | Last-resort renderer |
 
-```
-┌──────────────────────────────────────────┐
-│            createMellowRenderer()         │
-│                  ↓                        │
-│         detectMellowCapabilities()        │
-│         ┌────────┼────────┐              │
-│         ↓        ↓        ↓              │
-│    Tier 3    Tier 2    Tier 1            │
-│    WebGPU    WebGL 2   Canvas 2D         │
-│    + NPU               + Workers         │
-└──────────────────────────────────────────┘
-```
+`webgpu+webnn` does not mean the browser guarantees a physical NPU. The current WebNN standard accepts an accelerated-execution preference, but the user agent chooses between available CPU, GPU, and dedicated ML accelerators. `capabilities.neuralBackend` reports `webnn-accelerated`, `webnn`, `cpu`, or `none`; the legacy `npuInference` field remains `false` because WebNN does not expose the selected physical device.
 
-| Tier | GPU API | Compute | 3D | NPU | Min Browser |
-|------|---------|---------|----|-----|-------------|
-| 3 — `webgpu+npu` | WebGPU | GPU shaders | ✅ | ✅ | Chrome 113+ |
-| 3 — `webgpu` | WebGPU | GPU shaders | ✅ | ❌ | Chrome 113+ |
-| 2 — `webgl2` | WebGL 2 | CPU Workers | ❌ | ❌ | All modern |
-| 1 — `cpu` | Canvas 2D | CPU Workers | ❌ | ❌ | Every browser |
+## WebGPU path
 
-## Quick Start
+The Tier 3 renderer includes:
 
-```bash
-npm install
-npm run build
-npm run demo
-```
+- persistent tile accumulation with dirty-tile clearing;
+- premultiplied-alpha geometry, image, text, and brush pipelines;
+- correct line-width geometry and tessellated vector fills/strokes;
+- procedural anti-aliased brush edges using WGSL derivatives;
+- instanced brush dabs with growable GPU buffers;
+- cached image and text textures with bounded text-cache eviction;
+- automatic fallback when WebGPU adapter/device creation fails.
+
+The renderer is currently 2D. `supports3D` is deliberately `false` until a real 3D command and depth pipeline exist.
+
+## WebNN brush refinement
+
+Long brush strokes are prepared asynchronously so pointer rendering is never blocked. A fixed WebNN matrix graph smooths adjacent position, size, and opacity samples in batches. Short strokes use the equivalent CPU operation because dispatch overhead would be larger than the work. Pending pointer updates are coalesced so only the newest node command is refined.
+
+WebNN requires a secure context. For embedded deployments, allow the `webnn` Permissions Policy for the application origin. If context creation, graph compilation, or dispatch fails, refinement falls back to the matching CPU implementation.
 
 ## Usage
 
 ```typescript
-import { createMellowRenderer, detectMellowCapabilities } from "@lenout/render";
+import { createLenoutRenderer } from "@lenout/render";
+import { createRenderPipeline } from "@lenout/render/pipeline";
 
-const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+const canvas = document.querySelector("canvas")!;
+const renderer = await createLenoutRenderer(canvas, {
+  neuralBrushSmoothing: 0.18,
+  powerPreference: "high-performance",
+});
+renderer.initialize();
 
-// Check what hardware we have
-const caps = await detectMellowCapabilities();
-console.log(`Running on tier: ${caps.tier}`);
+const pipeline = createRenderPipeline(sceneGraph, tileManager, renderer);
+pipeline.render(canvas.width, canvas.height);
 
-// Create the renderer — auto-selects tier
-const renderer = await createMellowRenderer(canvas);
-renderer.start();
-
-// Cleanup
 renderer.destroy();
 ```
 
-## Package Structure
+Set `neuralBrushSmoothing` to `0` to preserve raw dab values, or use a value from `0` to `1` to blend toward neural/CPU-refined values.
 
-```
+## Source layout
+
+```text
 src/
-├── mellowRenderer.ts       ← Entry point + tier detection + factory
-├── types.ts                ← Shared types (Rect, Color, RenderCommand, etc.)
-├── tileManager.ts          ← Tile system (dirty marking, viewport culling, eviction)
-├── sceneGraph.ts           ← SoA scene graph (flat typed arrays)
-├── tier3/
-│   └── webgpuRenderer.ts   ← Tier 3: native WebGPU + compute shaders + NPU
-├── tier2/
-│   └── webgl2Renderer.ts   ← Tier 2: WebGL 2 rendering, CPU compute fallback
-├── tier1/
-│   └── canvas2dRenderer.ts ← Tier 1: pure Canvas 2D + OffscreenCanvas Workers
-├── shaders/
-│   └── (WGSL shaders — coming soon)
-└── workers/
-    └── (Web Workers — coming soon)
+├── renderer.ts                 capability detection and tier factory
+├── pipeline.ts                 dirty-tile orchestration and async preparation
+├── neural/
+│   ├── webnnTypes.ts           narrow WebNN runtime types
+│   └── webnnBrushRefiner.ts    accelerated graph and CPU fallback
+└── tier3/
+    ├── webgpuRenderer.ts       frame and tile orchestration
+    ├── webgpuResources.ts      pipelines, buffers, and texture cache
+    ├── webgpuGeometry.ts       command tessellation
+    ├── webgpuShaders.ts        WGSL programs
+    └── textBitmapCache.ts      bounded text raster cache
 ```
 
-## Key Design Decisions
-
-- **Zero runtime dependencies** — only TypeScript + WebGPU/WebGL/Canvas APIs
-- **Tile-based rendering** — only dirty tiles are re-rendered
-- **SoA scene graph** — Structure-of-Arrays for CPU cache efficiency
-- **Automatic tier detection** — no configuration needed
-- **No GC in render loop** — object pools + flat buffers
-
-## License
-
-UNLICENSED — proprietary, all rights reserved.
+The package has no runtime dependencies. TypeScript, Vite, Vitest, and WebGPU declarations are development-only dependencies.

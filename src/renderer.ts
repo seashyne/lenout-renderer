@@ -1,0 +1,190 @@
+/**
+ * Lenout Renderer (night) — zero-dependency WebGPU render engine.
+ *
+ * Codename "night" — the feeling of drawing on glass.
+ * No jank, no lag, no compromise.
+ *
+ * @packageDocumentation
+ */
+
+export type LenoutTier = "cpu" | "webgl2" | "webgpu" | "webgpu+webnn";
+
+import type { RenderCommand, RenderTile } from "./types.js";
+import { probeWebNN } from "./neural/webnnBrushRefiner.js";
+import type { NeuralBackend } from "./neural/webnnTypes.js";
+
+export interface LenoutRendererOptions {
+  /** Strength of asynchronous neural dab smoothing. Zero disables refinement. */
+  neuralBrushSmoothing?: number;
+  powerPreference?: GPUPowerPreference;
+}
+
+export interface LenoutCapabilities {
+  tier: LenoutTier;
+  gpuCompute: boolean;
+  /** WebNN graph execution is available. The browser chooses the physical accelerator. */
+  webnnInference: boolean;
+  /** @deprecated WebNN does not expose whether the selected accelerator is specifically an NPU. */
+  npuInference: boolean;
+  neuralBackend: NeuralBackend;
+  maxBrushDabs: number;
+  tileSize: number;
+  supports3D: boolean;
+  workerCount: number;
+}
+
+/**
+ * Tile-aware renderer — the pipeline drives rendering per-tile.
+ *
+ * Frame lifecycle:
+ *   1. beginFrame()  — prepare canvas / reset state
+ *   2. renderTile()  — called once per dirty tile (skip for clean tiles)
+ *   3. endFrame()    — finalize and present
+ */
+export interface LenoutRenderer {
+  readonly capabilities: LenoutCapabilities;
+  /** One-time GPU resource allocation */
+  initialize(): void;
+  /** Optional asynchronous command preparation. Rendering continues with the unprepared commands meanwhile. */
+  prepareCommands?(commands: readonly RenderCommand[]): Promise<RenderCommand[]>;
+  /** Begin a new frame */
+  beginFrame(): void;
+  /** Render commands clipped to a single tile. isDirty=false skips (clean tile). */
+  renderTile(tile: RenderTile, commands: RenderCommand[], isDirty: boolean): void;
+  /** End the frame */
+  endFrame(): void;
+  /** Release all GPU resources */
+  destroy(): void;
+}
+
+// ---------------------------------------------------------------------------
+// Tier detection
+// ---------------------------------------------------------------------------
+
+let cachedCapabilities: LenoutCapabilities | null = null;
+
+const checkWebGPU = async (): Promise<GPUAdapter | null> => {
+  if (typeof navigator === "undefined" || !("gpu" in navigator)) return null;
+  try {
+    const adapter = await navigator.gpu.requestAdapter({
+      powerPreference: "high-performance",
+    });
+    return adapter ?? null;
+  } catch {
+    return null;
+  }
+};
+
+const checkWebGL2 = (): boolean => {
+  if (typeof document === "undefined") return false;
+  try {
+    const c = document.createElement("canvas");
+    return Boolean(c.getContext("webgl2"));
+  } catch {
+    return false;
+  }
+};
+
+export const detectLenoutCapabilities = async (): Promise<LenoutCapabilities> => {
+  if (cachedCapabilities) return cachedCapabilities;
+
+  const workers = typeof navigator === "undefined" ? 4 : navigator.hardwareConcurrency || 4;
+  const [gpuAdapter, webnn] = await Promise.all([checkWebGPU(), probeWebNN()]);
+
+  if (gpuAdapter) {
+    cachedCapabilities = {
+      tier: webnn.available ? "webgpu+webnn" : "webgpu",
+      gpuCompute: true,
+      webnnInference: webnn.available,
+      npuInference: false,
+      neuralBackend: webnn.available ? (webnn.accelerated ? "webnn-accelerated" : "webnn") : "none",
+      maxBrushDabs: Number.POSITIVE_INFINITY,
+      tileSize: 256,
+      supports3D: false,
+      workerCount: 1,
+    };
+    return cachedCapabilities;
+  }
+
+  if (checkWebGL2()) {
+    cachedCapabilities = {
+      tier: "webgl2",
+      gpuCompute: false,
+      webnnInference: false,
+      npuInference: false,
+      neuralBackend: "none",
+      maxBrushDabs: 500,
+      tileSize: 256,
+      supports3D: false,
+      workerCount: workers,
+    };
+    return cachedCapabilities;
+  }
+
+  cachedCapabilities = {
+    tier: "cpu",
+    gpuCompute: false,
+    webnnInference: false,
+    npuInference: false,
+    neuralBackend: "none",
+    maxBrushDabs: 200,
+    tileSize: 128,
+    supports3D: false,
+    workerCount: workers,
+  };
+  return cachedCapabilities;
+};
+
+// ---------------------------------------------------------------------------
+// Factory
+// ---------------------------------------------------------------------------
+
+export const createLenoutRenderer = async (
+  canvas: HTMLCanvasElement,
+  options: LenoutRendererOptions = {},
+): Promise<LenoutRenderer> => {
+  const caps = await detectLenoutCapabilities();
+
+  switch (caps.tier) {
+    case "webgpu":
+    case "webgpu+webnn": {
+      try {
+        const { createWebGPURenderer } = await import("./tier3/webgpuRenderer.js");
+        return await createWebGPURenderer(canvas, caps, options);
+      } catch {
+        if (checkWebGL2()) {
+          const { createWebGL2Renderer } = await import("./tier2/webgl2Renderer.js");
+          return createWebGL2Renderer(canvas, {
+            ...caps,
+            tier: "webgl2",
+            gpuCompute: false,
+            webnnInference: false,
+            neuralBackend: "none",
+            maxBrushDabs: 500,
+            supports3D: false,
+            workerCount: typeof navigator === "undefined" ? 4 : navigator.hardwareConcurrency || 4,
+          });
+        }
+        const { createCanvas2DRenderer } = await import("./tier1/canvas2dRenderer.js");
+        return createCanvas2DRenderer(canvas, {
+          ...caps,
+          tier: "cpu",
+          gpuCompute: false,
+          webnnInference: false,
+          neuralBackend: "none",
+          maxBrushDabs: 200,
+          tileSize: 128,
+          supports3D: false,
+        });
+      }
+    }
+    case "webgl2": {
+      const { createWebGL2Renderer } = await import("./tier2/webgl2Renderer.js");
+      return createWebGL2Renderer(canvas, caps);
+    }
+    default: {
+      const { createCanvas2DRenderer } = await import("./tier1/canvas2dRenderer.js");
+      return createCanvas2DRenderer(canvas, caps);
+    }
+  }
+};

@@ -27,13 +27,17 @@ export const createTileManager = (tileSize: number): TileManager => {
   const allocate = (tx: number, ty: number): RenderTile => {
     const id = tileId(tx, ty);
     const existing = tiles.get(id);
-    if (existing) return existing;
+    if (existing) {
+      existing.lastAccessFrame = frameCount;
+      return existing;
+    }
     const tile: RenderTile = {
       id,
       worldX: tx * tileSize,
       worldY: ty * tileSize,
       size: tileSize,
       dirty: true,
+      lastAccessFrame: frameCount,
     };
     tiles.set(id, tile);
     return tile;
@@ -48,7 +52,10 @@ export const createTileManager = (tileSize: number): TileManager => {
       for (let ty = minTY; ty <= maxTY; ty++) {
         for (let tx = minTX; tx <= maxTX; tx++) {
           const tile = tiles.get(tileId(tx, ty));
-          if (tile) tile.dirty = true;
+          if (tile) {
+            tile.dirty = true;
+            tile.lastAccessFrame = frameCount;
+          }
         }
       }
     },
@@ -77,11 +84,10 @@ export const createTileManager = (tileSize: number): TileManager => {
 
     evict(maxAgeFrames: number): void {
       for (const [id, tile] of tiles) {
-        // Stub: track lastAccessFrame per tile
-        void id;
-        void tile;
+        if (frameCount - tile.lastAccessFrame > maxAgeFrames) {
+          tiles.delete(id);
+        }
       }
-      void maxAgeFrames;
     },
 
     reset(): void {

@@ -106,4 +106,34 @@ describe("TileManager", () => {
     // All tiles should be dirty after reset + recreation
     expect(after.every((t) => t.dirty)).toBe(true);
   });
+
+  it("evicts tiles that have not been accessed", () => {
+    const tm = createTileManager(256);
+
+    // Create tiles at (0,0) — these get lastAccessFrame = 0
+    const first = tm.visibleTiles(0, 0, 1, 256, 256);
+    expect(first.length).toBeGreaterThan(0);
+
+    // Access (256,0) for several frames — those tiles stay fresh
+    for (let i = 0; i < 5; i++) tm.visibleTiles(256, 0, 1, 256, 256);
+
+    // Evict tiles older than 2 frames
+    tm.evict(2);
+
+    // Now access (0,0) again — old tiles evicted, new ones created with fresh access time
+    const remaining = tm.visibleTiles(0, 0, 1, 256, 256);
+    expect(remaining.every((t) => t.lastAccessFrame >= 5)).toBe(true);
+  });
+
+  it("keeps tiles accessed within the age window", () => {
+    const tm = createTileManager(256);
+    tm.visibleTiles(0, 0, 1, 256, 256); // frame 0
+    tm.visibleTiles(0, 0, 1, 256, 256); // frame 1 — refreshes access
+
+    // Evict tiles older than 0 frames — tiles accessed at frame 1 survive
+    tm.evict(0);
+
+    const tiles = tm.visibleTiles(0, 0, 1, 256, 256); // frame 2
+    expect(tiles.length).toBeGreaterThan(0);
+  });
 });
