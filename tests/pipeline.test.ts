@@ -17,9 +17,21 @@ const stubRenderer = (): LenoutRenderer & { tileCalls: { tile: RenderTile; cmds:
       neuralBackend: "none",
       maxBrushDabs: 200,
       tileSize: 128,
+      supportsVectorPaths: true,
+      supportsSvg: true,
+      supportsTextLayout: true,
+      blendModes: ["normal", "multiply", "screen", "add"],
+      supports2_5D: true,
       supports3D: false,
       workerCount: 4,
     } satisfies LenoutCapabilities,
+    runtime: {
+      state: "ready",
+      resourceRevision: 0,
+      deviceLosses: 0,
+      lastDeviceLoss: null,
+      ai: { backend: "none", completedTasks: 0, failedTasks: 0, pendingTasks: 0 },
+    },
     display: {
       logicalWidth: 1,
       logicalHeight: 1,
@@ -138,5 +150,49 @@ describe("RenderPipeline (tile-aware)", () => {
     pipeline.render(320, 180);
 
     expect(renderer.tileCalls.slice(callsBefore).some((call) => call.dirty)).toBe(true);
+  });
+
+  it("keeps dirty tiles pending while GPU resources recover", () => {
+    const sg = createSceneGraph({ maxNodes: 10 });
+    const tm = createTileManager(128);
+    const renderer = stubRenderer();
+    const pipeline = createRenderPipeline(sg, tm, renderer);
+    const idx = sg.add(NodeKind.Vector, 0, 0, 100, 100);
+    pipeline.setNodeCommands(idx, [
+      { type: "rect", dst: { x: 0, y: 0, width: 100, height: 100 }, fill: [1, 0, 0, 1], radius: 0 },
+    ]);
+
+    renderer.runtime.state = "recovering";
+    pipeline.render(320, 180);
+    expect(renderer.tileCalls).toHaveLength(0);
+
+    renderer.runtime.state = "ready";
+    renderer.runtime.resourceRevision++;
+    pipeline.render(320, 180);
+    expect(renderer.tileCalls.some((call) => call.dirty)).toBe(true);
+  });
+
+  it("composites farther 2.5D layers before foreground layers", () => {
+    const sg = createSceneGraph({ maxNodes: 10 });
+    const tm = createTileManager(128, { overscanTiles: 0 });
+    const renderer = stubRenderer();
+    const pipeline = createRenderPipeline(sg, tm, renderer);
+    const foreground = sg.add(NodeKind.Vector, 0, 0, 50, 50);
+    const background = sg.add(NodeKind.Vector, 0, 0, 50, 50);
+    sg.setDepth(foreground, -1);
+    sg.setDepth(background, 2);
+    pipeline.setNodeCommands(foreground, [
+      { type: "rect", dst: { x: 0, y: 0, width: 50, height: 50 }, fill: [1, 0, 0, 1], radius: 0 },
+    ]);
+    pipeline.setNodeCommands(background, [
+      { type: "rect", dst: { x: 0, y: 0, width: 50, height: 50 }, fill: [0, 0, 1, 1], radius: 0 },
+    ]);
+
+    pipeline.render(100, 100);
+    const commands = renderer.tileCalls.find((call) => call.cmds.length === 2)?.cmds;
+    expect(commands?.map((command) => command.type === "rect" ? command.fill : null)).toEqual([
+      [0, 0, 1, 1],
+      [1, 0, 0, 1],
+    ]);
   });
 });

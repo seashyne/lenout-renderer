@@ -11,6 +11,7 @@ export enum NodeKind {
   Vector = 2,
   Text = 3,
   Stroke = 4,
+  Audio = 5,
 }
 
 export interface SceneGraphInit {
@@ -24,6 +25,8 @@ export interface SceneGraph {
   remove(index: number): void;
   /** Update world transform */
   setTransform(index: number, x: number, y: number, rotation: number, scaleX: number, scaleY: number): void;
+  /** Set 2.5D depth and camera-parallax response. Positive depth is farther away. */
+  setDepth(index: number, depth: number, parallax?: number): void;
   /** Mark node as dirty (needs re-render) */
   markDirty(index: number): void;
   /** Get all dirty node indices and clear the set */
@@ -44,6 +47,8 @@ export interface SceneData {
   scaleY: Float32Array;
   opacity: Float32Array;
   zIndex: Int32Array;
+  depth: Float32Array;
+  parallax: Float32Array;
   count: number;
 }
 
@@ -64,6 +69,8 @@ export const createSceneGraph = (init: SceneGraphInit = {}): SceneGraph => {
     scaleY: new Float32Array(max).fill(1),
     opacity: new Float32Array(max).fill(1),
     zIndex: new Int32Array(max),
+    depth: new Float32Array(max),
+    parallax: new Float32Array(max).fill(1),
     count: 0,
   };
 
@@ -82,6 +89,13 @@ export const createSceneGraph = (init: SceneGraphInit = {}): SceneGraph => {
       data.worldY[i] = y;
       data.width[i] = w;
       data.height[i] = h;
+      data.rotation[i] = 0;
+      data.scaleX[i] = 1;
+      data.scaleY[i] = 1;
+      data.opacity[i] = 1;
+      data.zIndex[i] = 0;
+      data.depth[i] = 0;
+      data.parallax[i] = 1;
       dirty.add(i);
       return i;
     },
@@ -97,6 +111,12 @@ export const createSceneGraph = (init: SceneGraphInit = {}): SceneGraph => {
       data.rotation[i] = rotation;
       data.scaleX[i] = scaleX;
       data.scaleY[i] = scaleY;
+      dirty.add(i);
+    },
+
+    setDepth(i, depth, parallax = 1): void {
+      data.depth[i] = Number.isFinite(depth) ? depth : 0;
+      data.parallax[i] = Number.isFinite(parallax) ? Math.max(0, parallax) : 1;
       dirty.add(i);
     },
 

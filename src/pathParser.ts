@@ -1,8 +1,3 @@
-// ---------------------------------------------------------------------------
-// SVG Path Parser — parses path `d` attribute into segment lists and
-// tessellates curves into flat polyline approximations.
-// ---------------------------------------------------------------------------
-
 import type { Vec2 } from "./types.js";
 
 export type PathSegment =
@@ -10,199 +5,321 @@ export type PathSegment =
   | { cmd: "L"; x: number; y: number }
   | { cmd: "C"; x1: number; y1: number; x2: number; y2: number; x: number; y: number }
   | { cmd: "Q"; x1: number; y1: number; x: number; y: number }
+  | { cmd: "A"; rx: number; ry: number; rotation: number; largeArc: boolean; sweep: boolean; x: number; y: number }
   | { cmd: "Z" };
 
-/** Parse SVG path `d` string into an array of segments */
+export interface PathContour {
+  closed: boolean;
+  points: Vec2[];
+}
+
+const tokenPattern = /[a-zA-Z]|[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?/g;
+const isCommand = (token: string | undefined): boolean => Boolean(token && /^[a-zA-Z]$/.test(token));
+const parameterCount: Record<string, number> = { M: 2, L: 2, H: 1, V: 1, C: 6, S: 4, Q: 4, T: 2, A: 7 };
+
+/**
+ * Parse SVG path data and normalize relative, shorthand, horizontal and
+ * vertical commands into absolute segments. Invalid trailing data is ignored.
+ */
 export const parsePath = (d: string): PathSegment[] => {
+  const tokens = d.match(tokenPattern) ?? [];
   const segments: PathSegment[] = [];
-  // Tokenize: split on commas/whitespace, keep command letters
-  const tokens = d
-    .replace(/([MLCQZ])/gi, " $1 ")
-    .trim()
-    .split(/[\s,]+/)
-    .filter(Boolean);
+  let index = 0;
+  let active = "";
+  let x = 0;
+  let y = 0;
+  let startX = 0;
+  let startY = 0;
+  let previousCubicControl: Vec2 | null = null;
+  let previousQuadControl: Vec2 | null = null;
 
-  let i = 0;
-  let curX = 0;
-  let curY = 0;
+  const numberAt = (offset: number): number | null => {
+    const token = tokens[index + offset];
+    if (token === undefined || isCommand(token)) return null;
+    const value = Number(token);
+    return Number.isFinite(value) ? value : null;
+  };
+  const absolute = (value: number, origin: number, relative: boolean): number => relative ? origin + value : value;
+  const resetControls = (): void => {
+    previousCubicControl = null;
+    previousQuadControl = null;
+  };
 
-  while (i < tokens.length) {
-    const raw = tokens[i]!;
-    const cmd = raw.toUpperCase();
-    i++;
+  while (index < tokens.length) {
+    const token = tokens[index]!;
+    if (isCommand(token)) {
+      active = token;
+      index++;
+      if (active.toUpperCase() === "Z") {
+        segments.push({ cmd: "Z" });
+        x = startX;
+        y = startY;
+        resetControls();
+        active = "";
+      }
+      continue;
+    }
+    if (!active) {
+      index++;
+      continue;
+    }
 
-    switch (cmd) {
+    const upper = active.toUpperCase();
+    const count = parameterCount[upper];
+    if (!count || index + count > tokens.length) break;
+    const values: number[] = [];
+    for (let offset = 0; offset < count; offset++) {
+      const value = numberAt(offset);
+      if (value === null) break;
+      values.push(value);
+    }
+    if (values.length !== count) {
+      active = "";
+      continue;
+    }
+    index += count;
+    const relative = active === active.toLowerCase();
+
+    switch (upper) {
       case "M": {
-        const x = parseFloat(tokens[i++]!);
-        const y = parseFloat(tokens[i++]!);
-        const isRel = raw === "m";
-        curX = isRel ? curX + x : x;
-        curY = isRel ? curY + y : y;
-        segments.push({ cmd: "M", x: curX, y: curY });
-        // Implicit L if more coords follow
-        while (i < tokens.length && !/[MLCQZ]/i.test(tokens[i]!)) {
-          const lx = parseFloat(tokens[i++]!);
-          const ly = parseFloat(tokens[i++]!);
-          curX = isRel ? curX + lx : lx;
-          curY = isRel ? curY + ly : ly;
-          segments.push({ cmd: "L", x: curX, y: curY });
-        }
+        x = absolute(values[0]!, x, relative);
+        y = absolute(values[1]!, y, relative);
+        startX = x;
+        startY = y;
+        segments.push({ cmd: "M", x, y });
+        active = relative ? "l" : "L";
+        resetControls();
         break;
       }
       case "L": {
-        do {
-          const x = parseFloat(tokens[i++]!);
-          const y = parseFloat(tokens[i++]!);
-          const isRel = raw === "l";
-          curX = isRel ? curX + x : x;
-          curY = isRel ? curY + y : y;
-          segments.push({ cmd: "L", x: curX, y: curY });
-        } while (i < tokens.length && !/[MLCQZ]/i.test(tokens[i]!));
+        x = absolute(values[0]!, x, relative);
+        y = absolute(values[1]!, y, relative);
+        segments.push({ cmd: "L", x, y });
+        resetControls();
+        break;
+      }
+      case "H": {
+        x = absolute(values[0]!, x, relative);
+        segments.push({ cmd: "L", x, y });
+        resetControls();
+        break;
+      }
+      case "V": {
+        y = absolute(values[0]!, y, relative);
+        segments.push({ cmd: "L", x, y });
+        resetControls();
         break;
       }
       case "C": {
-        do {
-          const x1 = parseFloat(tokens[i++]!);
-          const y1 = parseFloat(tokens[i++]!);
-          const x2 = parseFloat(tokens[i++]!);
-          const y2 = parseFloat(tokens[i++]!);
-          const x = parseFloat(tokens[i++]!);
-          const y = parseFloat(tokens[i++]!);
-          const isRel = raw === "c";
-          if (isRel) {
-            curX += x; curY += y;
-            segments.push({ cmd: "C", x1: curX - x + x1, y1: curY - y + y1, x2: curX - x + x2, y2: curY - y + y2, x: curX, y: curY });
-          } else {
-            curX = x; curY = y;
-            segments.push({ cmd: "C", x1, y1, x2, y2, x: curX, y: curY });
-          }
-        } while (i < tokens.length && !/[MLCQZ]/i.test(tokens[i]!));
+        const x1 = absolute(values[0]!, x, relative);
+        const y1 = absolute(values[1]!, y, relative);
+        const x2 = absolute(values[2]!, x, relative);
+        const y2 = absolute(values[3]!, y, relative);
+        x = absolute(values[4]!, x, relative);
+        y = absolute(values[5]!, y, relative);
+        segments.push({ cmd: "C", x1, y1, x2, y2, x, y });
+        previousCubicControl = { x: x2, y: y2 };
+        previousQuadControl = null;
+        break;
+      }
+      case "S": {
+        const reflected: Vec2 = previousCubicControl ? { x: x * 2 - previousCubicControl.x, y: y * 2 - previousCubicControl.y } : { x, y };
+        const x2 = absolute(values[0]!, x, relative);
+        const y2 = absolute(values[1]!, y, relative);
+        x = absolute(values[2]!, x, relative);
+        y = absolute(values[3]!, y, relative);
+        segments.push({ cmd: "C", x1: reflected.x, y1: reflected.y, x2, y2, x, y });
+        previousCubicControl = { x: x2, y: y2 };
+        previousQuadControl = null;
         break;
       }
       case "Q": {
-        do {
-          const x1 = parseFloat(tokens[i++]!);
-          const y1 = parseFloat(tokens[i++]!);
-          const x = parseFloat(tokens[i++]!);
-          const y = parseFloat(tokens[i++]!);
-          const isRel = raw === "q";
-          if (isRel) {
-            curX += x; curY += y;
-            segments.push({ cmd: "Q", x1: curX - x + x1, y1: curY - y + y1, x: curX, y: curY });
-          } else {
-            curX = x; curY = y;
-            segments.push({ cmd: "Q", x1, y1, x: curX, y: curY });
-          }
-        } while (i < tokens.length && !/[MLCQZ]/i.test(tokens[i]!));
+        const x1 = absolute(values[0]!, x, relative);
+        const y1 = absolute(values[1]!, y, relative);
+        x = absolute(values[2]!, x, relative);
+        y = absolute(values[3]!, y, relative);
+        segments.push({ cmd: "Q", x1, y1, x, y });
+        previousQuadControl = { x: x1, y: y1 };
+        previousCubicControl = null;
         break;
       }
-      case "Z": {
-        segments.push({ cmd: "Z" });
+      case "T": {
+        const reflected: Vec2 = previousQuadControl ? { x: x * 2 - previousQuadControl.x, y: y * 2 - previousQuadControl.y } : { x, y };
+        x = absolute(values[0]!, x, relative);
+        y = absolute(values[1]!, y, relative);
+        segments.push({ cmd: "Q", x1: reflected.x, y1: reflected.y, x, y });
+        previousQuadControl = reflected;
+        previousCubicControl = null;
+        break;
+      }
+      case "A": {
+        const endX = absolute(values[5]!, x, relative);
+        const endY = absolute(values[6]!, y, relative);
+        segments.push({
+          cmd: "A",
+          rx: Math.abs(values[0]!),
+          ry: Math.abs(values[1]!),
+          rotation: values[2]!,
+          largeArc: values[3] !== 0,
+          sweep: values[4] !== 0,
+          x: endX,
+          y: endY,
+        });
+        x = endX;
+        y = endY;
+        resetControls();
         break;
       }
     }
   }
-
   return segments;
 };
 
-/** Evaluate cubic bezier at parameter t (0–1) */
 const cubicBezier = (t: number, p0: number, p1: number, p2: number, p3: number): number => {
   const u = 1 - t;
   return u * u * u * p0 + 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t * p3;
 };
 
-/** Evaluate quadratic bezier at parameter t */
 const quadBezier = (t: number, p0: number, p1: number, p2: number): number => {
   const u = 1 - t;
   return u * u * p0 + 2 * u * t * p1 + t * t * p2;
 };
 
-/**
- * Tessellate path segments into flat points.
- * Curves are approximated with `segmentsPerCurve` line segments.
- * Returns array of polylines (sub-paths separated by M/Z commands).
- */
-export const tessellatePath = (
-  segments: PathSegment[],
-  segmentsPerCurve: number = 16,
-): Vec2[][] => {
-  const polylines: Vec2[][] = [];
-  let current: Vec2[] = [];
-  let startX = 0;
-  let startY = 0;
-  let curX = 0;
-  let curY = 0;
+const vectorAngle = (ux: number, uy: number, vx: number, vy: number): number =>
+  Math.atan2(ux * vy - uy * vx, ux * vx + uy * vy);
 
-  for (const seg of segments) {
-    switch (seg.cmd) {
-      case "M": {
-        if (current.length > 0) polylines.push(current);
-        current = [];
-        curX = seg.x;
-        curY = seg.y;
-        startX = curX;
-        startY = curY;
-        current.push({ x: curX, y: curY });
+const tessellateArc = (from: Vec2, segment: Extract<PathSegment, { cmd: "A" }>, resolution: number): Vec2[] => {
+  if (segment.rx === 0 || segment.ry === 0 || (from.x === segment.x && from.y === segment.y)) {
+    return [{ x: segment.x, y: segment.y }];
+  }
+  const phi = segment.rotation * Math.PI / 180;
+  const cosine = Math.cos(phi);
+  const sine = Math.sin(phi);
+  const dx = (from.x - segment.x) * 0.5;
+  const dy = (from.y - segment.y) * 0.5;
+  const transformedX = cosine * dx + sine * dy;
+  const transformedY = -sine * dx + cosine * dy;
+  let rx = segment.rx;
+  let ry = segment.ry;
+  const scale = transformedX ** 2 / rx ** 2 + transformedY ** 2 / ry ** 2;
+  if (scale > 1) {
+    const root = Math.sqrt(scale);
+    rx *= root;
+    ry *= root;
+  }
+  const numerator = Math.max(0, rx ** 2 * ry ** 2 - rx ** 2 * transformedY ** 2 - ry ** 2 * transformedX ** 2);
+  const denominator = rx ** 2 * transformedY ** 2 + ry ** 2 * transformedX ** 2;
+  const direction = segment.largeArc === segment.sweep ? -1 : 1;
+  const coefficient = denominator === 0 ? 0 : direction * Math.sqrt(numerator / denominator);
+  const centerPrimeX = coefficient * (rx * transformedY / ry);
+  const centerPrimeY = coefficient * (-ry * transformedX / rx);
+  const centerX = cosine * centerPrimeX - sine * centerPrimeY + (from.x + segment.x) * 0.5;
+  const centerY = sine * centerPrimeX + cosine * centerPrimeY + (from.y + segment.y) * 0.5;
+  const startX = (transformedX - centerPrimeX) / rx;
+  const startY = (transformedY - centerPrimeY) / ry;
+  const endX = (-transformedX - centerPrimeX) / rx;
+  const endY = (-transformedY - centerPrimeY) / ry;
+  const startAngle = vectorAngle(1, 0, startX, startY);
+  let delta = vectorAngle(startX, startY, endX, endY);
+  if (!segment.sweep && delta > 0) delta -= Math.PI * 2;
+  if (segment.sweep && delta < 0) delta += Math.PI * 2;
+  const steps = Math.max(2, Math.ceil(Math.abs(delta) / (Math.PI * 2) * resolution * 4));
+  const points: Vec2[] = [];
+  for (let step = 1; step <= steps; step++) {
+    const angle = startAngle + delta * step / steps;
+    const arcX = rx * Math.cos(angle);
+    const arcY = ry * Math.sin(angle);
+    points.push({
+      x: cosine * arcX - sine * arcY + centerX,
+      y: sine * arcX + cosine * arcY + centerY,
+    });
+  }
+  return points;
+};
+
+/** Tessellate normalized SVG segments while preserving open/closed subpaths. */
+export const tessellatePathContours = (segments: readonly PathSegment[], resolution = 16): PathContour[] => {
+  const contours: PathContour[] = [];
+  let points: Vec2[] = [];
+  let closed = false;
+  let current = { x: 0, y: 0 };
+  let start = { x: 0, y: 0 };
+  const steps = Math.max(2, Math.min(256, Math.round(resolution)));
+  const flush = (): void => {
+    if (points.length > 0) contours.push({ closed, points });
+    points = [];
+    closed = false;
+  };
+
+  for (const segment of segments) {
+    switch (segment.cmd) {
+      case "M":
+        flush();
+        current = { x: segment.x, y: segment.y };
+        start = current;
+        points.push(current);
         break;
-      }
-      case "L": {
-        curX = seg.x;
-        curY = seg.y;
-        current.push({ x: curX, y: curY });
+      case "L":
+        current = { x: segment.x, y: segment.y };
+        points.push(current);
         break;
-      }
       case "C": {
-        const fromX = curX, fromY = curY;
-        for (let i = 1; i <= segmentsPerCurve; i++) {
-          const t = i / segmentsPerCurve;
-          curX = cubicBezier(t, fromX, seg.x1, seg.x2, seg.x);
-          curY = cubicBezier(t, fromY, seg.y1, seg.y2, seg.y);
-          current.push({ x: curX, y: curY });
+        const from = current;
+        for (let step = 1; step <= steps; step++) {
+          const t = step / steps;
+          current = {
+            x: cubicBezier(t, from.x, segment.x1, segment.x2, segment.x),
+            y: cubicBezier(t, from.y, segment.y1, segment.y2, segment.y),
+          };
+          points.push(current);
         }
         break;
       }
       case "Q": {
-        const fromX = curX, fromY = curY;
-        for (let i = 1; i <= segmentsPerCurve; i++) {
-          const t = i / segmentsPerCurve;
-          curX = quadBezier(t, fromX, seg.x1, seg.x);
-          curY = quadBezier(t, fromY, seg.y1, seg.y);
-          current.push({ x: curX, y: curY });
+        const from = current;
+        for (let step = 1; step <= steps; step++) {
+          const t = step / steps;
+          current = {
+            x: quadBezier(t, from.x, segment.x1, segment.x),
+            y: quadBezier(t, from.y, segment.y1, segment.y),
+          };
+          points.push(current);
         }
         break;
       }
-      case "Z": {
-        if (current.length > 0) {
-          current.push({ x: startX, y: startY });
-        }
-        curX = startX;
-        curY = startY;
+      case "A":
+        points.push(...tessellateArc(current, segment, steps));
+        current = { x: segment.x, y: segment.y };
         break;
-      }
+      case "Z":
+        if (points.length > 0 && (current.x !== start.x || current.y !== start.y)) points.push(start);
+        current = start;
+        closed = true;
+        break;
     }
   }
-
-  if (current.length > 0) polylines.push(current);
-  return polylines;
+  flush();
+  return contours;
 };
 
-/** Generate circle points (for tessellation into triangle fan) */
-export const circlePoints = (cx: number, cy: number, radius: number, segments: number = 32): Vec2[] => {
-  const pts: Vec2[] = [];
-  for (let i = 0; i < segments; i++) {
-    const a = (Math.PI * 2 * i) / segments;
-    pts.push({ x: cx + Math.cos(a) * radius, y: cy + Math.sin(a) * radius });
+/** Backwards-compatible polyline view of tessellated path contours. */
+export const tessellatePath = (segments: readonly PathSegment[], resolution = 16): Vec2[][] =>
+  tessellatePathContours(segments, resolution).map((contour) => contour.points);
+
+export const circlePoints = (cx: number, cy: number, radius: number, segments = 32): Vec2[] => {
+  const points: Vec2[] = [];
+  for (let index = 0; index < segments; index++) {
+    const angle = Math.PI * 2 * index / segments;
+    points.push({ x: cx + Math.cos(angle) * radius, y: cy + Math.sin(angle) * radius });
   }
-  return pts;
+  return points;
 };
 
-/** Generate ellipse points */
-export const ellipsePoints = (cx: number, cy: number, rx: number, ry: number, segments: number = 32): Vec2[] => {
-  const pts: Vec2[] = [];
-  for (let i = 0; i < segments; i++) {
-    const a = (Math.PI * 2 * i) / segments;
-    pts.push({ x: cx + Math.cos(a) * rx, y: cy + Math.sin(a) * ry });
+export const ellipsePoints = (cx: number, cy: number, rx: number, ry: number, segments = 32): Vec2[] => {
+  const points: Vec2[] = [];
+  for (let index = 0; index < segments; index++) {
+    const angle = Math.PI * 2 * index / segments;
+    points.push({ x: cx + Math.cos(angle) * rx, y: cy + Math.sin(angle) * ry });
   }
-  return pts;
+  return points;
 };

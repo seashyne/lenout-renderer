@@ -1,6 +1,8 @@
-import { circlePoints, ellipsePoints, parsePath, tessellatePath } from "../pathParser.js";
+import { resolveComposite } from "../compositor.js";
+import { circlePoints, ellipsePoints } from "../pathParser.js";
 import { triangulate } from "../triangulate.js";
-import type { BrushDab, Color, Rect, RenderCommand, RenderTile, Vec2 } from "../types.js";
+import type { BrushDab, Color, Rect, RenderCommand, RenderTile, StrokeStyle, Vec2 } from "../types.js";
+import { sharedVectorPathCache } from "../vectorPath.js";
 
 const SOLID_FLOATS = 6;
 const IMAGE_FLOATS = 5;
@@ -15,6 +17,8 @@ const appendTriangle = (target: number[], a: Vec2, b: Vec2, c: Vec2, color: Colo
   appendVertex(target, b, color);
   appendVertex(target, c, color);
 };
+
+const withOpacity = (color: Color, opacity: number): Color => [color[0], color[1], color[2], color[3] * opacity];
 
 const appendPolygon = (target: number[], points: readonly Vec2[], color: Color): void => {
   if (points.length < 3) return;
@@ -84,13 +88,24 @@ const appendLine = (target: number[], from: Vec2, to: Vec2, width: number, color
 const appendStroke = (
   target: number[],
   points: readonly Vec2[],
-  width: number,
-  color: Color,
+  style: StrokeStyle,
   closed: boolean,
 ): void => {
+  const { width, color } = style;
   const end = closed ? points.length : points.length - 1;
   for (let index = 0; index < end; index++) {
     appendLine(target, points[index]!, points[(index + 1) % points.length]!, width, color);
+  }
+  if (style.lineJoin === "round") {
+    const firstJoin = closed ? 0 : 1;
+    const lastJoin = closed ? points.length : points.length - 1;
+    for (let index = firstJoin; index < lastJoin; index++) {
+      appendPolygon(target, circlePoints(points[index]!.x, points[index]!.y, width / 2, 12), color);
+    }
+  }
+  if (!closed && style.lineCap === "round" && points.length > 1) {
+    appendPolygon(target, circlePoints(points[0]!.x, points[0]!.y, width / 2, 12), color);
+    appendPolygon(target, circlePoints(points.at(-1)!.x, points.at(-1)!.y, width / 2, 12), color);
   }
 };
 
@@ -102,36 +117,43 @@ export const appendSolidGeometry = (
   tile: RenderTile,
 ): { vertexOffset: number; vertexCount: number; replace: boolean } | null => {
   const start = target.length / SOLID_FLOATS;
+  const opacity = resolveComposite(command.composite).opacity;
   switch (command.type) {
     case "clear":
-      appendRect(target, { x: tile.worldX, y: tile.worldY, width: tile.size, height: tile.size }, command.color);
+      appendRect(target, { x: tile.worldX, y: tile.worldY, width: tile.size, height: tile.size }, withOpacity(command.color, opacity));
       break;
-    case "rect":
-      appendPolygon(target, roundedRectPoints(command.dst, command.radius), command.fill);
+    case "rect": {
+      const points = roundedRectPoints(command.dst, command.radius);
+      if (command.fill) appendPolygon(target, points, withOpacity(command.fill, opacity));
+      if (command.stroke) appendStroke(target, points, { ...command.stroke, color: withOpacity(command.stroke.color, opacity) }, true);
       break;
+    }
     case "circle": {
       const points = circlePoints(command.cx, command.cy, command.radius, curveSegments(command.radius));
-      appendPolygon(target, points, command.fill);
-      if (command.stroke) appendStroke(target, points, command.stroke.width, command.stroke.color, true);
+      if (command.fill) appendPolygon(target, points, withOpacity(command.fill, opacity));
+      if (command.stroke) appendStroke(target, points, { ...command.stroke, color: withOpacity(command.stroke.color, opacity) }, true);
       break;
     }
     case "ellipse": {
       const points = ellipsePoints(command.cx, command.cy, command.rx, command.ry, curveSegments(Math.max(command.rx, command.ry)));
-      appendPolygon(target, points, command.fill);
-      if (command.stroke) appendStroke(target, points, command.stroke.width, command.stroke.color, true);
+      if (command.fill) appendPolygon(target, points, withOpacity(command.fill, opacity));
+      if (command.stroke) appendStroke(target, points, { ...command.stroke, color: withOpacity(command.stroke.color, opacity) }, true);
       break;
     }
     case "line":
-      appendLine(target, { x: command.x1, y: command.y1 }, { x: command.x2, y: command.y2 }, command.width, command.color);
+      appendLine(target, { x: command.x1, y: command.y1 }, { x: command.x2, y: command.y2 }, command.width, withOpacity(command.color, opacity));
       break;
     case "polygon":
-      appendPolygon(target, command.points, command.fill);
-      if (command.stroke) appendStroke(target, command.points, command.stroke.width, command.stroke.color, true);
+      if (command.fill) appendPolygon(target, command.points, withOpacity(command.fill, opacity));
+      if (command.stroke) appendStroke(target, command.points, { ...command.stroke, color: withOpacity(command.stroke.color, opacity) }, true);
+      break;
+    case "polyline":
+      appendStroke(target, command.points, { ...command.stroke, color: withOpacity(command.stroke.color, opacity) }, false);
       break;
     case "path":
-      for (const points of tessellatePath(parsePath(command.d), 20)) {
-        appendPolygon(target, points, command.fill);
-        if (command.stroke) appendStroke(target, points, command.stroke.width, command.stroke.color, true);
+      for (const contour of sharedVectorPathCache.get(command.d).contours) {
+        if (command.fill) appendPolygon(target, contour.points, withOpacity(command.fill, opacity));
+        if (command.stroke) appendStroke(target, contour.points, { ...command.stroke, color: withOpacity(command.stroke.color, opacity) }, contour.closed);
       }
       break;
     default:
@@ -161,13 +183,13 @@ export const appendImageGeometry = (target: number[], rect: Rect, opacity: numbe
   return { vertexOffset: start, vertexCount: 6 };
 };
 
-export const appendBrushInstances = (target: number[], dabs: readonly BrushDab[]): { firstInstance: number; instanceCount: number } => {
+export const appendBrushInstances = (target: number[], dabs: readonly BrushDab[], opacity = 1): { firstInstance: number; instanceCount: number } => {
   const start = target.length / BRUSH_FLOATS;
   for (const dab of dabs) {
     target.push(
       dab.x, dab.y, Math.max(0.01, dab.size), Math.max(0, Math.min(1, dab.hardness)),
       dab.color[0], dab.color[1], dab.color[2], dab.color[3],
-      Math.max(0, Math.min(1, dab.opacity)), dab.rotation,
+      Math.max(0, Math.min(1, dab.opacity * opacity)), dab.rotation,
     );
   }
   return { firstInstance: start, instanceCount: dabs.length };

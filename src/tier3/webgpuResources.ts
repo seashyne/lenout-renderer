@@ -1,26 +1,31 @@
 import { BRUSH_SHADER, IMAGE_SHADER, SOLID_SHADER } from "./webgpuShaders.js";
+import type { BlendMode } from "../types.js";
 
 export interface ImageResource {
   bindGroup: GPUBindGroup;
 }
 
 export interface DynamicGPUBuffer {
-  upload(values: readonly number[]): GPUBuffer;
+  beginFrame(): void;
+  upload(values: readonly number[]): { buffer: GPUBuffer; byteOffset: number };
+  endFrame(): void;
   destroy(): void;
 }
 
 export interface WebGPUResources {
   canvasBindGroup: GPUBindGroup;
-  solidBlendPipeline: GPURenderPipeline;
   solidReplacePipeline: GPURenderPipeline;
-  imagePipeline: GPURenderPipeline;
-  brushPipeline: GPURenderPipeline;
+  solidPipeline(mode: BlendMode): GPURenderPipeline;
+  imagePipeline(mode: BlendMode): GPURenderPipeline;
+  brushPipeline(mode: BlendMode): GPURenderPipeline;
   solidBuffer: DynamicGPUBuffer;
   imageBuffer: DynamicGPUBuffer;
   brushBuffer: DynamicGPUBuffer;
   quadBuffer: GPUBuffer;
   getImage(source: ImageBitmap): ImageResource | null;
   releaseImage(source: ImageBitmap): void;
+  beginFrame(): void;
+  endFrame(): void;
   updateCanvasSize(width: number, height: number): void;
   destroy(): void;
 }
@@ -30,6 +35,28 @@ const premultipliedBlend: GPUBlendState = {
   alpha: { operation: "add", srcFactor: "one", dstFactor: "one-minus-src-alpha" },
 };
 
+const blendState = (mode: BlendMode): GPUBlendState => {
+  if (mode === "add") {
+    return {
+      color: { operation: "add", srcFactor: "one", dstFactor: "one" },
+      alpha: { operation: "add", srcFactor: "one", dstFactor: "one" },
+    };
+  }
+  if (mode === "multiply") {
+    return {
+      color: { operation: "add", srcFactor: "dst", dstFactor: "one-minus-src-alpha" },
+      alpha: premultipliedBlend.alpha,
+    };
+  }
+  if (mode === "screen") {
+    return {
+      color: { operation: "add", srcFactor: "one", dstFactor: "one-minus-src" },
+      alpha: premultipliedBlend.alpha,
+    };
+  }
+  return premultipliedBlend;
+};
+
 const createDynamicBuffer = (
   device: GPUDevice,
   label: string,
@@ -37,21 +64,41 @@ const createDynamicBuffer = (
 ): DynamicGPUBuffer => {
   let capacity = 0;
   let buffer: GPUBuffer | undefined;
+  let cursor = 0;
+  const retired = new Set<GPUBuffer>();
   return {
+    beginFrame() {
+      cursor = 0;
+    },
     upload(values) {
       const byteLength = Math.max(4, values.length * Float32Array.BYTES_PER_ELEMENT);
-      if (!buffer || byteLength > capacity) {
-        buffer?.destroy();
-        capacity = 2 ** Math.ceil(Math.log2(byteLength));
+      if (!buffer || cursor + byteLength > capacity) {
+        if (buffer) retired.add(buffer);
+        capacity = 2 ** Math.ceil(Math.log2(Math.max(byteLength, capacity * 2, 4)));
         buffer = device.createBuffer({ label, size: capacity, usage: usage | GPUBufferUsage.COPY_DST });
+        cursor = 0;
       }
-      device.queue.writeBuffer(buffer, 0, new Float32Array(values));
-      return buffer;
+      const byteOffset = cursor;
+      device.queue.writeBuffer(buffer, byteOffset, new Float32Array(values));
+      cursor += byteLength;
+      return { buffer, byteOffset };
+    },
+    endFrame() {
+      if (!retired.size) return;
+      const pending = [...retired];
+      retired.clear();
+      void device.queue.onSubmittedWorkDone().then(
+        () => pending.forEach((entry) => entry.destroy()),
+        () => pending.forEach((entry) => entry.destroy()),
+      );
     },
     destroy() {
       buffer?.destroy();
+      retired.forEach((entry) => entry.destroy());
+      retired.clear();
       buffer = undefined;
       capacity = 0;
+      cursor = 0;
     },
   };
 };
@@ -123,9 +170,21 @@ export const createWebGPUResources = (
   ];
 
   const solidReplacePipeline = createPipeline(device, "Lenout solid replace", SOLID_SHADER, [canvasLayout], solidBuffers, format);
-  const solidBlendPipeline = createPipeline(device, "Lenout solid blend", SOLID_SHADER, [canvasLayout], solidBuffers, format, premultipliedBlend);
-  const imagePipeline = createPipeline(device, "Lenout image", IMAGE_SHADER, [canvasLayout, imageLayout], imageBuffers, format, premultipliedBlend);
-  const brushPipeline = createPipeline(device, "Lenout brush", BRUSH_SHADER, [canvasLayout], brushBuffers, format, premultipliedBlend);
+  const pipelineCache = new Map<string, GPURenderPipeline>();
+  const blendedPipeline = (
+    kind: "solid" | "image" | "brush",
+    mode: BlendMode,
+  ): GPURenderPipeline => {
+    const key = `${kind}:${mode}`;
+    const cached = pipelineCache.get(key);
+    if (cached) return cached;
+    const shader = kind === "solid" ? SOLID_SHADER : kind === "image" ? IMAGE_SHADER : BRUSH_SHADER;
+    const layouts = kind === "image" ? [canvasLayout, imageLayout] : [canvasLayout];
+    const buffers = kind === "solid" ? solidBuffers : kind === "image" ? imageBuffers : brushBuffers;
+    const pipeline = createPipeline(device, `Lenout ${kind} ${mode}`, shader, layouts, buffers, format, blendState(mode));
+    pipelineCache.set(key, pipeline);
+    return pipeline;
+  };
 
   const canvasBuffer = device.createBuffer({
     label: "Lenout canvas uniforms",
@@ -184,10 +243,10 @@ export const createWebGPUResources = (
 
   return {
     canvasBindGroup,
-    solidBlendPipeline,
     solidReplacePipeline,
-    imagePipeline,
-    brushPipeline,
+    solidPipeline: (mode) => blendedPipeline("solid", mode),
+    imagePipeline: (mode) => blendedPipeline("image", mode),
+    brushPipeline: (mode) => blendedPipeline("brush", mode),
     solidBuffer,
     imageBuffer,
     brushBuffer,
@@ -204,6 +263,16 @@ export const createWebGPUResources = (
         () => resource.texture.destroy(),
         () => resource.texture.destroy(),
       );
+    },
+    beginFrame() {
+      solidBuffer.beginFrame();
+      imageBuffer.beginFrame();
+      brushBuffer.beginFrame();
+    },
+    endFrame() {
+      solidBuffer.endFrame();
+      imageBuffer.endFrame();
+      brushBuffer.endFrame();
     },
     updateCanvasSize(width, height) {
       device.queue.writeBuffer(canvasBuffer, 0, new Float32Array([

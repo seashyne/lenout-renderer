@@ -1,7 +1,7 @@
 {
   "name": "@lenout/render",
-  "version": "0.7.0",
-  "description": "Lenout Renderer (night) — DPI-aware tile-based WebGPU renderer with WebNN refinement and WebGL2/Canvas fallbacks.",
+  "version": "0.9.0",
+  "description": "Lenout Renderer (night) — DPI-aware tile-based WebGPU renderer with vector, SVG, text, compositing, WebNN refinement, and browser fallbacks.",
   "publishConfig": {
     "access": "public"
   },
@@ -35,9 +35,40 @@
     },
     "./tier1": "./dist/tier1/canvas2dRenderer.js",
     "./tier2": "./dist/tier2/webgl2Renderer.js",
-    "./tier3": "./dist/tier3/webgpuRenderer.js"
+    "./tier3": "./dist/tier3/webgpuRenderer.js",
+    "./gpu-device": {
+      "types": "./dist/gpuDevice.d.ts",
+      "import": "./dist/gpuDevice.js"
+    },
+    "./depth-projection": {
+      "types": "./dist/depthProjection.d.ts",
+      "import": "./dist/depthProjection.js"
+    },
+    "./compositor": {
+      "types": "./dist/compositor.d.ts",
+      "import": "./dist/compositor.js"
+    },
+    "./svg": {
+      "types": "./dist/svg.d.ts",
+      "import": "./dist/svg.js"
+    },
+    "./text-layout": {
+      "types": "./dist/textLayout.d.ts",
+      "import": "./dist/textLayout.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js"
+    },
+    "./vector-path": {
+      "types": "./dist/vectorPath.d.ts",
+      "import": "./dist/vectorPath.js"
+    }
   },
-  "files": ["dist/", "src/shaders/*.wgsl"],
+  "files": [
+    "dist/",
+    "src/shaders/*.wgsl"
+  ],
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "npm run clean && tsc",
@@ -45,18 +76,27 @@
     "prepack": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
+    "benchmark": "npm run build && node benchmarks/tile-cache.mjs",
     "demo": "vite demo --open"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/seashyne/lenout-renderer.git"
   },
-  "keywords": ["webgpu", "renderer", "2d", "tile-rendering", "webnn", "canvas", "lenout"],
+  "keywords": [
+    "webgpu",
+    "renderer",
+    "2d",
+    "tile-rendering",
+    "webnn",
+    "canvas",
+    "lenout"
+  ],
   "license": "UNLICENSED",
   "devDependencies": {
-    "@webgpu/types": "^0.1.44",
-    "typescript": "^5.5.0",
-    "vite": "^5.4.0",
-    "vitest": "^2.0.0"
+    "@webgpu/types": "^0.1.71",
+    "typescript": "^5.7.2",
+    "vite": "^6.4.3",
+    "vitest": "^4.1.10"
   }
 }

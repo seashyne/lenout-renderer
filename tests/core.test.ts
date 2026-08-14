@@ -64,6 +64,16 @@ describe("SceneGraph", () => {
     expect(sg.data.scaleY[a]).toBe(2);
     expect(sg.flushDirty()).toEqual([a]);
   });
+
+  it("stores 2.5D depth and parallax in the scene graph", () => {
+    const sg = createSceneGraph({ maxNodes: 4 });
+    const audio = sg.add(NodeKind.Audio, 0, 0, 200, 48);
+    sg.flushDirty();
+    sg.setDepth(audio, 2.5, 0.4);
+    expect(sg.data.depth[audio]).toBe(2.5);
+    expect(sg.data.parallax[audio]).toBeCloseTo(0.4, 5);
+    expect(sg.flushDirty()).toEqual([audio]);
+  });
 });
 
 describe("TileManager", () => {
@@ -135,5 +145,31 @@ describe("TileManager", () => {
 
     const tiles = tm.visibleTiles(0, 0, 1, 256, 256); // frame 2
     expect(tiles.length).toBeGreaterThan(0);
+  });
+
+  it("uses collision-free identities for distant signed coordinates", () => {
+    const tm = createTileManager(1, { overscanTiles: 0 });
+    const origin = tm.visibleTiles(0, 0, 1, 0, 0)[0]!;
+    const distant = tm.visibleTiles(0, -65_536, 1, 0, 0)[0]!;
+    expect(distant.id).not.toBe(origin.id);
+    expect(distant.worldY).toBe(65_536);
+  });
+
+  it("treats dirty rectangles as half-open at tile boundaries", () => {
+    const tm = createTileManager(256, { overscanTiles: 0 });
+    const tiles = tm.visibleTiles(0, 0, 1, 512, 256);
+    tiles.forEach((tile) => { tile.dirty = false; });
+    tm.markDirtyRect({ x: 0, y: 0, width: 256, height: 256 });
+    expect(tiles.find((tile) => tile.worldX === 0 && tile.worldY === 0)?.dirty).toBe(true);
+    expect(tiles.find((tile) => tile.worldX === 256 && tile.worldY === 0)?.dirty).toBe(false);
+  });
+
+  it("bounds the retained offscreen tile cache", () => {
+    const tm = createTileManager(64, { maxCachedTiles: 16, overscanTiles: 0 });
+    for (let frame = 0; frame < 40; frame++) {
+      tm.visibleTiles(-frame * 64, 0, 1, 64, 64);
+      tm.evict(300);
+    }
+    expect(tm.stats.cachedTileCount).toBeLessThanOrEqual(16);
   });
 });

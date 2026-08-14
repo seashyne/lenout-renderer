@@ -9,10 +9,11 @@
 
 export type LenoutTier = "cpu" | "webgl2" | "webgpu" | "webgpu+webnn";
 
-import type { RenderCommand, RenderTile } from "./types.js";
+import type { BlendMode, RenderCommand, RenderTile } from "./types.js";
 import { probeWebNN } from "./neural/webnnBrushRefiner.js";
 import type { NeuralBackend } from "./neural/webnnTypes.js";
 import type { LenoutDisplayMetrics, LenoutDpiOptions, LenoutPixelRatio } from "./dpi.js";
+import { acquireLenoutGpuDevice } from "./gpuDevice.js";
 
 export type { LenoutDisplayMetrics, LenoutDpiOptions, LenoutPixelRatio } from "./dpi.js";
 
@@ -20,6 +21,25 @@ export interface LenoutRendererOptions extends LenoutDpiOptions {
   /** Strength of asynchronous neural dab smoothing. Zero disables refinement. */
   neuralBrushSmoothing?: number;
   powerPreference?: GPUPowerPreference;
+  /** Automatically reacquire a WebGPU device after a browser/GPU reset. */
+  recoverDeviceLoss?: boolean;
+}
+
+export type LenoutRendererRuntimeState = "ready" | "recovering" | "lost" | "destroyed";
+
+/** Live renderer health. A resource revision change invalidates retained tiles. */
+export interface LenoutRendererRuntimeStatus {
+  state: LenoutRendererRuntimeState;
+  resourceRevision: number;
+  deviceLosses: number;
+  lastDeviceLoss: { message: string; reason: GPUDeviceLostReason } | null;
+  /** Live AI/WebNN command-preparation diagnostics. */
+  ai: {
+    backend: NeuralBackend;
+    completedTasks: number;
+    failedTasks: number;
+    pendingTasks: number;
+  };
 }
 
 export interface LenoutCapabilities {
@@ -32,6 +52,11 @@ export interface LenoutCapabilities {
   neuralBackend: NeuralBackend;
   maxBrushDabs: number;
   tileSize: number;
+  supportsVectorPaths: boolean;
+  supportsSvg: boolean;
+  supportsTextLayout: boolean;
+  blendModes: readonly BlendMode[];
+  supports2_5D: boolean;
   supports3D: boolean;
   workerCount: number;
 }
@@ -46,6 +71,8 @@ export interface LenoutCapabilities {
  */
 export interface LenoutRenderer {
   readonly capabilities: LenoutCapabilities;
+  /** Runtime readiness and GPU-resource generation. */
+  readonly runtime: LenoutRendererRuntimeStatus;
   /** Logical size and physical backing-store resolution currently in use. */
   readonly display: LenoutDisplayMetrics;
   /** Resize in logical CSS pixels. Returns true when the backing store changed. */
@@ -69,19 +96,22 @@ export interface LenoutRenderer {
 // ---------------------------------------------------------------------------
 
 let cachedCapabilities: LenoutCapabilities | null = null;
-
-const checkWebGPU = async (): Promise<GPUAdapter | null> => {
-  if (typeof navigator === "undefined" || !("gpu" in navigator)) return null;
-  try {
-    const adapter = await navigator.gpu.requestAdapter({
-      powerPreference: "high-performance",
-    });
-    return adapter ?? null;
-  } catch {
-    return null;
-  }
+const browser2DCapabilities = {
+  supportsVectorPaths: true,
+  supportsSvg: true,
+  supportsTextLayout: true,
+  blendModes: ["normal", "multiply", "screen", "add"] as const,
 };
 
+const checkWebGPU = async (): Promise<boolean> => {
+  try {
+    const lease = await acquireLenoutGpuDevice({ powerPreference: "high-performance" });
+    lease.release();
+    return true;
+  } catch {
+    return false;
+  }
+};
 const checkWebGL2 = (): boolean => {
   if (typeof document === "undefined") return false;
   try {
@@ -96,9 +126,9 @@ export const detectLenoutCapabilities = async (): Promise<LenoutCapabilities> =>
   if (cachedCapabilities) return cachedCapabilities;
 
   const workers = typeof navigator === "undefined" ? 4 : navigator.hardwareConcurrency || 4;
-  const [gpuAdapter, webnn] = await Promise.all([checkWebGPU(), probeWebNN()]);
+  const [webgpu, webnn] = await Promise.all([checkWebGPU(), probeWebNN()]);
 
-  if (gpuAdapter) {
+  if (webgpu) {
     cachedCapabilities = {
       tier: webnn.available ? "webgpu+webnn" : "webgpu",
       gpuCompute: true,
@@ -107,6 +137,8 @@ export const detectLenoutCapabilities = async (): Promise<LenoutCapabilities> =>
       neuralBackend: webnn.available ? (webnn.accelerated ? "webnn-accelerated" : "webnn") : "none",
       maxBrushDabs: Number.POSITIVE_INFINITY,
       tileSize: 256,
+      ...browser2DCapabilities,
+      supports2_5D: true,
       supports3D: false,
       workerCount: 1,
     };
@@ -122,6 +154,8 @@ export const detectLenoutCapabilities = async (): Promise<LenoutCapabilities> =>
       neuralBackend: "none",
       maxBrushDabs: 500,
       tileSize: 256,
+      ...browser2DCapabilities,
+      supports2_5D: true,
       supports3D: false,
       workerCount: workers,
     };
@@ -136,6 +170,8 @@ export const detectLenoutCapabilities = async (): Promise<LenoutCapabilities> =>
     neuralBackend: "none",
     maxBrushDabs: 200,
     tileSize: 128,
+    ...browser2DCapabilities,
+    supports2_5D: true,
     supports3D: false,
     workerCount: workers,
   };
@@ -168,6 +204,7 @@ export const createLenoutRenderer = async (
             webnnInference: false,
             neuralBackend: "none",
             maxBrushDabs: 500,
+            supports2_5D: true,
             supports3D: false,
             workerCount: typeof navigator === "undefined" ? 4 : navigator.hardwareConcurrency || 4,
           }, options);
@@ -181,6 +218,7 @@ export const createLenoutRenderer = async (
           neuralBackend: "none",
           maxBrushDabs: 200,
           tileSize: 128,
+          supports2_5D: true,
           supports3D: false,
         }, options);
       }

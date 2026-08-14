@@ -1,8 +1,11 @@
 import { createCanvasDpiController } from "../dpi.js";
+import { resolveComposite } from "../compositor.js";
 import type { LenoutCapabilities, LenoutRenderer, LenoutRendererOptions } from "../renderer.js";
-import type { RenderCommand, RenderTile, Color, Vec2 } from "../types.js";
-import { circlePoints, ellipsePoints, tessellatePath, parsePath } from "../pathParser.js";
+import type { BlendMode, RenderCommand, RenderTile, Color, StrokeStyle, Vec2 } from "../types.js";
+import { circlePoints, ellipsePoints } from "../pathParser.js";
 import { triangulate, buildTriangleVertices, fanTriangulate } from "../triangulate.js";
+import { sharedVectorPathCache } from "../vectorPath.js";
+import { createTextBitmapCache } from "../tier3/textBitmapCache.js";
 
 /**
  * Tier 2 — WebGL 2 renderer.
@@ -113,6 +116,8 @@ void main() {
 const colorToFloats = ([r, g, b, a]: Color): Float32Array =>
   new Float32Array([r, g, b, a]);
 
+const withOpacity = (color: Color, opacity: number): Color => [color[0], color[1], color[2], color[3] * opacity];
+
 const QUAD_POSITIONS = new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]);
 const QUAD_TEXCOORDS = new Float32Array([0, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0]);
 
@@ -186,6 +191,13 @@ export const createWebGL2Renderer = (
   options: LenoutRendererOptions = {},
 ): LenoutRenderer => {
   const display = createCanvasDpiController(canvas, options);
+  const runtime = {
+    state: "ready" as const,
+    resourceRevision: 0,
+    deviceLosses: 0,
+    lastDeviceLoss: null,
+    ai: { backend: capabilities.neuralBackend, completedTasks: 0, failedTasks: 0, pendingTasks: 0 },
+  };
   const gl = canvas.getContext("webgl2", {
     alpha: false,
     antialias: false,
@@ -250,6 +262,19 @@ export const createWebGL2Renderer = (
     textureCache.set(src, tex);
     return tex;
   };
+  const textCache = createTextBitmapCache(128, (source) => {
+    const texture = textureCache.get(source);
+    if (texture) gl.deleteTexture(texture);
+    textureCache.delete(source);
+  }, () => display.metrics.pixelRatio);
+
+  const applyBlendMode = (mode: BlendMode): void => {
+    gl.blendEquation(gl.FUNC_ADD);
+    if (mode === "add") gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+    else if (mode === "multiply") gl.blendFunc(gl.DST_COLOR, gl.ONE_MINUS_SRC_ALPHA);
+    else if (mode === "screen") gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_COLOR);
+    else gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  };
 
   const setupVAOs = (): void => {
     rectVAO = gl.createVertexArray()!;
@@ -301,7 +326,7 @@ export const createWebGL2Renderer = (
   };
 
   /** Upload brush dab data to instance buffer and draw instanced */
-  const drawBrushDabs = (dabs: { x: number; y: number; size: number; color: Color; opacity: number; rotation: number }[]): void => {
+  const drawBrushDabs = (dabs: { x: number; y: number; size: number; color: Color; opacity: number; rotation: number }[], opacity: number): void => {
     if (dabs.length === 0) return;
     const count = Math.min(dabs.length, MAX_INSTANCES);
     const data = new Float32Array(count * 10);
@@ -315,7 +340,7 @@ export const createWebGL2Renderer = (
       data[off + 4] = d.color[1];
       data[off + 5] = d.color[2];
       data[off + 6] = d.color[3];
-      data[off + 7] = d.opacity;
+      data[off + 7] = d.opacity * opacity;
       data[off + 8] = d.rotation;
       data[off + 9] = 0; // padding
     }
@@ -334,6 +359,7 @@ export const createWebGL2Renderer = (
 
   return {
     capabilities,
+    runtime,
     get display() {
       return display.metrics;
     },
@@ -441,68 +467,92 @@ export const createWebGL2Renderer = (
         gl.deleteBuffer(buf);
       };
 
+      const drawPolyline = (points: readonly Vec2[], stroke: StrokeStyle, closed: boolean, opacity: number): void => {
+        if (points.length < 2 || stroke.width <= 0) return;
+        const ndc = new Float32Array(points.length * 2);
+        for (let index = 0; index < points.length; index++) {
+          ndc[index * 2] = (points[index]!.x / w) * 2 - 1;
+          ndc[index * 2 + 1] = 1 - (points[index]!.y / h) * 2;
+        }
+        const buffer = gl.createBuffer()!;
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, ndc, gl.DYNAMIC_DRAW);
+        gl.lineWidth(stroke.width * ratio);
+        gl.useProgram(rectProgram);
+        gl.bindVertexArray(rectVAO);
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+        gl.uniform4fv(rectUColor, colorToFloats(withOpacity(stroke.color, opacity)));
+        gl.uniformMatrix3fv(rectUTransform, false, new Float32Array([1,0,0,0,1,0,0,0,1]));
+        gl.drawArrays(closed ? gl.LINE_LOOP : gl.LINE_STRIP, 0, points.length);
+        gl.deleteBuffer(buffer);
+      };
+
       for (const cmd of commands) {
+        const composite = resolveComposite(cmd.composite);
+        if (composite.opacity <= 0) continue;
+        applyBlendMode(composite.blendMode);
         switch (cmd.type) {
           case "clear": {
-            gl.clearColor(cmd.color[0], cmd.color[1], cmd.color[2], cmd.color[3]);
+            gl.clearColor(cmd.color[0], cmd.color[1], cmd.color[2], cmd.color[3] * composite.opacity);
             gl.clear(gl.COLOR_BUFFER_BIT);
             break;
           }
           case "rect": {
-            gl.useProgram(rectProgram);
-            gl.bindVertexArray(rectVAO);
-            gl.uniform4fv(rectUColor, colorToFloats(cmd.fill));
-            gl.uniformMatrix3fv(rectUTransform, false, rectTransform(cmd.dst.x, cmd.dst.y, cmd.dst.width, cmd.dst.height, w, h));
-            gl.drawArrays(gl.TRIANGLES, 0, 6);
+            if (cmd.fill) {
+              gl.useProgram(rectProgram);
+              gl.bindVertexArray(rectVAO);
+              gl.uniform4fv(rectUColor, colorToFloats(withOpacity(cmd.fill, composite.opacity)));
+              gl.uniformMatrix3fv(rectUTransform, false, rectTransform(cmd.dst.x, cmd.dst.y, cmd.dst.width, cmd.dst.height, w, h));
+              gl.drawArrays(gl.TRIANGLES, 0, 6);
+            }
+            if (cmd.stroke) drawPolyline([
+              { x: cmd.dst.x, y: cmd.dst.y },
+              { x: cmd.dst.x + cmd.dst.width, y: cmd.dst.y },
+              { x: cmd.dst.x + cmd.dst.width, y: cmd.dst.y + cmd.dst.height },
+              { x: cmd.dst.x, y: cmd.dst.y + cmd.dst.height },
+            ], cmd.stroke, true, composite.opacity);
             break;
           }
           case "circle": {
-            const pts = [
-              { x: cmd.cx, y: cmd.cy },
-              ...circlePoints(cmd.cx, cmd.cy, cmd.radius, 32),
-            ];
-            const idx = fanTriangulate(pts[0]!, pts.slice(1));
-            drawShapeFill(buildTriangleVertices(pts, idx), cmd.fill);
+            const outline = circlePoints(cmd.cx, cmd.cy, cmd.radius, 48);
+            if (cmd.fill) {
+              const points = [{ x: cmd.cx, y: cmd.cy }, ...outline];
+              drawShapeFill(buildTriangleVertices(points, fanTriangulate(points[0]!, outline)), withOpacity(cmd.fill, composite.opacity));
+            }
+            if (cmd.stroke) drawPolyline(outline, cmd.stroke, true, composite.opacity);
             break;
           }
           case "ellipse": {
-            const pts = [
-              { x: cmd.cx, y: cmd.cy },
-              ...ellipsePoints(cmd.cx, cmd.cy, cmd.rx, cmd.ry, 32),
-            ];
-            const idx = fanTriangulate(pts[0]!, pts.slice(1));
-            drawShapeFill(buildTriangleVertices(pts, idx), cmd.fill);
+            const outline = ellipsePoints(cmd.cx, cmd.cy, cmd.rx, cmd.ry, 48);
+            if (cmd.fill) {
+              const points = [{ x: cmd.cx, y: cmd.cy }, ...outline];
+              drawShapeFill(buildTriangleVertices(points, fanTriangulate(points[0]!, outline)), withOpacity(cmd.fill, composite.opacity));
+            }
+            if (cmd.stroke) drawPolyline(outline, cmd.stroke, true, composite.opacity);
             break;
           }
           case "line": {
-            const lineVerts = new Float32Array([cmd.x1, cmd.y1, cmd.x2, cmd.y2]);
-            const ndc = new Float32Array(4);
-            for (let i = 0; i < 4; i += 2) {
-              ndc[i] = (lineVerts[i]! / w) * 2 - 1;
-              ndc[i + 1] = 1 - (lineVerts[i + 1]! / h) * 2;
-            }
-            const buf = gl.createBuffer()!;
-            gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-            gl.bufferData(gl.ARRAY_BUFFER, ndc, gl.DYNAMIC_DRAW);
-            gl.lineWidth(cmd.width * ratio);
-            gl.useProgram(rectProgram);
-            gl.bindVertexArray(rectVAO);
-            gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-            gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-            gl.uniform4fv(rectUColor, colorToFloats(cmd.color));
-            gl.uniformMatrix3fv(rectUTransform, false, new Float32Array([1,0,0,0,1,0,0,0,1]));
-            gl.drawArrays(gl.LINES, 0, 2);
-            gl.deleteBuffer(buf);
+            drawPolyline([{ x: cmd.x1, y: cmd.y1 }, { x: cmd.x2, y: cmd.y2 }], { color: cmd.color, width: cmd.width }, false, composite.opacity);
             break;
           }
-          case "polygon":
+          case "polyline":
+            drawPolyline(cmd.points, cmd.stroke, false, composite.opacity);
+            break;
+          case "polygon": {
+            if (cmd.fill && cmd.points.length >= 3) {
+              drawShapeFill(buildTriangleVertices(cmd.points, triangulate(cmd.points)), withOpacity(cmd.fill, composite.opacity));
+            }
+            if (cmd.stroke) drawPolyline(cmd.points, cmd.stroke, true, composite.opacity);
+            break;
+          }
           case "path": {
-            const points: Vec2[] = cmd.type === "polygon"
-              ? cmd.points
-              : tessellatePath(parsePath(cmd.d), 16).flat();
-            if (points.length < 3) break;
-            const idx = triangulate(points);
-            drawShapeFill(buildTriangleVertices(points, idx), cmd.fill);
+            for (const contour of sharedVectorPathCache.get(cmd.d).contours) {
+              if (cmd.fill && contour.points.length >= 3) {
+                drawShapeFill(buildTriangleVertices(contour.points, triangulate(contour.points)), withOpacity(cmd.fill, composite.opacity));
+              }
+              if (cmd.stroke) drawPolyline(contour.points, cmd.stroke, contour.closed, composite.opacity);
+            }
             break;
           }
           case "image": {
@@ -510,47 +560,27 @@ export const createWebGL2Renderer = (
             gl.bindVertexArray(imageVAO);
             gl.uniformMatrix3fv(imgUTransform, false, rectTransform(cmd.dst.x, cmd.dst.y, cmd.dst.width, cmd.dst.height, w, h));
             gl.uniform1i(imgUTexture, 0);
-            gl.uniform1f(imgUOpacity, cmd.opacity);
+            gl.uniform1f(imgUOpacity, cmd.opacity * composite.opacity);
             gl.activeTexture(gl.TEXTURE0);
             gl.bindTexture(gl.TEXTURE_2D, getTexture(cmd.src));
             gl.drawArrays(gl.TRIANGLES, 0, 6);
             break;
           }
           case "text": {
-            // Fallback: render text via Canvas 2D, then draw as image
-            const c = document.createElement("canvas");
-            const textWidth = 512;
-            const textHeight = 64;
-            c.width = Math.ceil(textWidth * ratio);
-            c.height = Math.ceil(textHeight * ratio);
-            const tctx = c.getContext("2d")!;
-            tctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-            tctx.font = cmd.font || "24px sans-serif";
-            tctx.fillStyle = `rgba(${Math.round(cmd.color[0] * 255)},${Math.round(cmd.color[1] * 255)},${Math.round(cmd.color[2] * 255)},${cmd.color[3]})`;
-            tctx.textBaseline = "top";
-            tctx.fillText(cmd.text, 4, 4);
-
-            const tex = gl.createTexture()!;
-            gl.bindTexture(gl.TEXTURE_2D, tex);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
-
+            const text = textCache.get(cmd);
+            if (!text) break;
             gl.useProgram(imageProgram);
             gl.bindVertexArray(imageVAO);
-            gl.uniformMatrix3fv(imgUTransform, false, rectTransform(cmd.x, cmd.y, textWidth, textHeight, w, h));
+            gl.uniformMatrix3fv(imgUTransform, false, rectTransform(text.destination.x, text.destination.y, text.destination.width, text.destination.height, w, h));
             gl.uniform1i(imgUTexture, 0);
-            gl.uniform1f(imgUOpacity, 1);
+            gl.uniform1f(imgUOpacity, composite.opacity);
             gl.activeTexture(gl.TEXTURE0);
-            gl.bindTexture(gl.TEXTURE_2D, tex);
+            gl.bindTexture(gl.TEXTURE_2D, getTexture(text.source));
             gl.drawArrays(gl.TRIANGLES, 0, 6);
-            gl.deleteTexture(tex);
             break;
           }
           case "brushDabs": {
-            drawBrushDabs(cmd.dabs);
+            drawBrushDabs(cmd.dabs, composite.opacity);
             break;
           }
         }
@@ -572,9 +602,11 @@ export const createWebGL2Renderer = (
       gl.bindTexture(gl.TEXTURE_2D, accumTexture);
       gl.uniform1i(gl.getUniformLocation(blitProgram, "u_source")!, 0);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
+      textCache.sweep();
     },
 
     destroy(): void {
+      textCache.destroy();
       for (const tex of textureCache.values()) gl.deleteTexture(tex);
       textureCache.clear();
       gl.deleteTexture(brushTipTexture);
